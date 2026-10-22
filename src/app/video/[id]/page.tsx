@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback, Suspense } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo, Suspense } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { VideoRecord, VideoAnalysis, TranscriptSegment } from '@/lib/types';
@@ -74,7 +74,6 @@ function VideoDetailContent() {
 
   // Search
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<TranscriptSegment[]>([]);
 
   // Speaker rename
   const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
@@ -136,31 +135,32 @@ function VideoDetailContent() {
     loadData();
   }, [videoId, router, supabase]);
 
-  const currentSegments =
-    translationsCache[selectedLanguage] || analysis?.transcript_segments || [];
+  const currentSegments = useMemo(() => {
+    return translationsCache[selectedLanguage] || analysis?.transcript_segments || [];
+  }, [translationsCache, selectedLanguage, analysis?.transcript_segments]);
 
-  const activeSubtitle = currentSegments.find(
-    (seg) => currentTime >= seg.start && currentTime <= (seg.end || seg.start + 2.5)
-  );
+  const activeSubtitle = useMemo(() => {
+    return currentSegments.find(
+      (seg) => currentTime >= seg.start && currentTime <= (seg.end || seg.start + 2.5)
+    );
+  }, [currentSegments, currentTime]);
 
   const getSpeakerName = useCallback(
     (speaker: string) => analysis?.speaker_mapping?.[speaker] || speaker,
     [analysis]
   );
 
-  // Search transcript with active language
-  useEffect(() => {
+  // Memoized search results across active language segments (no setState / no infinite loop)
+  const searchResults = useMemo(() => {
     if (!currentSegments.length || !searchQuery.trim()) {
-      setSearchResults([]);
-      return;
+      return [];
     }
     const query = searchQuery.toLowerCase();
-    const results = currentSegments.filter(
+    return currentSegments.filter(
       (seg) =>
         seg.text.toLowerCase().includes(query) ||
         getSpeakerName(seg.speaker).toLowerCase().includes(query)
     );
-    setSearchResults(results);
   }, [searchQuery, currentSegments, getSpeakerName]);
 
   const isYouTube =
