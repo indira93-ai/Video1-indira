@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import Groq from 'groq-sdk';
+import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+const groq = getGroqClient();
 
 export async function POST(request: NextRequest) {
   try {
@@ -53,12 +51,13 @@ ${transcriptContext}
 
 Answer the user's question based ONLY on the video content. Be specific and reference timestamps when relevant. If the answer isn't in the content, say so.`;
 
+    const chatModel = await getSupportedGroqModel(groq);
     const completion = await groq.chat.completions.create({
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: question },
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: chatModel,
       temperature: 0.4,
       max_tokens: 1024,
     });

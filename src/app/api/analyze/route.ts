@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import Groq from 'groq-sdk';
+import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+const groq = getGroqClient();
 
 export const maxDuration = 300; // 5 minutes for Vercel Pro, adjust if needed
 
@@ -86,9 +84,10 @@ IMPORTANT RULES:
 - Be thorough and detailed in your analysis
 - Return ONLY valid JSON, no other text`;
 
+    const chatModel = await getSupportedGroqModel(groq);
     const completion = await groq.chat.completions.create({
       messages: [{ role: 'user', content: analysisPrompt }],
-      model: 'llama-3.3-70b-versatile',
+      model: chatModel,
       temperature: 0.3,
       max_tokens: 4096,
       response_format: { type: 'json_object' },
