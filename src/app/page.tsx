@@ -92,7 +92,7 @@ export default function LandingPage() {
             onClick={() => router.push('/login')}
             className="btn-primary text-sm"
           >
-            Get Started
+            Login
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>
