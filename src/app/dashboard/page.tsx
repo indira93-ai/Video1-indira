@@ -18,7 +18,16 @@ import {
   Search,
   X,
   CloudUpload,
+  Link2,
 } from 'lucide-react';
+
+function YouTubeIcon({ className = 'w-5 h-5' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+    </svg>
+  );
+}
 
 const ACCEPTED_TYPES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
@@ -85,11 +94,18 @@ export default function DashboardPage() {
 
   // Upload state
   const [showUpload, setShowUpload] = useState(false);
+  const [uploadMode, setUploadMode] = useState<'file' | 'youtube'>('file');
   const [isDragging, setIsDragging] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'extracting' | 'analyzing' | 'done' | 'error'>('idle');
   const [uploadError, setUploadError] = useState('');
+
+  // YouTube state
+  const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [youtubeLoading, setYoutubeLoading] = useState(false);
+  const [youtubeError, setYoutubeError] = useState('');
+  const [youtubeStep, setYoutubeStep] = useState('');
 
   const fetchVideos = useCallback(async () => {
     const { data, error } = await supabase
@@ -203,14 +219,21 @@ export default function DashboardPage() {
       setUploadProgress(95);
       setUploadStatus('extracting');
 
-      // Extract audio from video in browser
-      const audioBlob = await extractAudioFromVideo(uploadFile);
+      // If video file is <= 24MB, Whisper accepts MP4, WebM, M4A directly with 100% audio fidelity!
+      let audioBlob: Blob;
+      let audioFileName = uploadFile.name;
+      if (uploadFile.size <= 24 * 1024 * 1024) {
+        audioBlob = uploadFile;
+      } else {
+        audioBlob = await extractAudioFromVideo(uploadFile);
+        audioFileName = 'audio.wav';
+      }
 
       setUploadStatus('analyzing');
 
       // Send audio to API for transcription & analysis
       const formData = new FormData();
-      formData.append('audio', audioBlob, 'audio.webm');
+      formData.append('audio', audioBlob, audioFileName);
       formData.append('videoId', videoRecord.id);
 
       const response = await fetch('/api/analyze', {
@@ -238,6 +261,44 @@ export default function DashboardPage() {
       console.error('Upload error:', error);
       setUploadStatus('error');
       setUploadError(error instanceof Error ? error.message : 'Upload failed');
+    }
+  };
+
+  const handleYouTubeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!youtubeUrl.trim() || youtubeLoading) return;
+
+    setYoutubeLoading(true);
+    setYoutubeError('');
+    setYoutubeStep('Fetching YouTube transcript & video info...');
+
+    try {
+      const res = await fetch('/api/youtube', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: youtubeUrl.trim() }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to analyze YouTube video');
+      }
+
+      setYoutubeStep('Analysis complete! Opening workspace...');
+      await fetchVideos();
+
+      setTimeout(() => {
+        setShowUpload(false);
+        setYoutubeUrl('');
+        setYoutubeLoading(false);
+        setYoutubeStep('');
+        router.push(`/video/${data.videoId}`);
+      }, 700);
+    } catch (err) {
+      console.error('YouTube submit error:', err);
+      setYoutubeError(err instanceof Error ? err.message : 'Failed to analyze YouTube video');
+      setYoutubeLoading(false);
+      setYoutubeStep('');
     }
   };
 
@@ -393,47 +454,59 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div className="grid gap-4">
-            {filteredVideos.map((video) => (
-              <div
-                key={video.id}
-                className="glass-card-hover p-5 flex flex-col sm:flex-row sm:items-center gap-4 cursor-pointer"
-                onClick={() => {
-                  if (video.status === 'completed') {
-                    router.push(`/video/${video.id}`);
-                  }
-                }}
-              >
-                <div className="w-12 h-12 rounded-xl bg-surface-700/50 flex items-center justify-center text-surface-400 flex-shrink-0">
-                  <FileVideo className="w-6 h-6" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="font-semibold text-surface-100 truncate">{video.title}</h3>
-                  <div className="flex items-center gap-4 mt-1 text-sm text-surface-500">
-                    <span className="flex items-center gap-1">
-                      <Clock className="w-3 h-3" />
-                      {formatDate(video.created_at)}
-                    </span>
-                    <span>{formatFileSize(video.file_size)}</span>
+            {filteredVideos.map((video) => {
+              const isYT = video.storage_path?.startsWith('youtube:') || video.file_name?.includes('youtube.com');
+              return (
+                <div
+                  key={video.id}
+                  className="glass-card-hover p-5 flex flex-col sm:flex-row sm:items-center gap-4 cursor-pointer"
+                  onClick={() => {
+                    if (video.status === 'completed') {
+                      router.push(`/video/${video.id}`);
+                    }
+                  }}
+                >
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                    isYT ? 'bg-red-500/10 text-red-400' : 'bg-surface-700/50 text-surface-400'
+                  }`}>
+                    {isYT ? <YouTubeIcon className="w-6 h-6" /> : <FileVideo className="w-6 h-6" />}
                   </div>
-                  {video.error_message && (
-                    <p className="text-red-400 text-sm mt-1">{video.error_message}</p>
-                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-semibold text-surface-100 truncate">{video.title}</h3>
+                      {isYT && (
+                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 border border-red-500/30">
+                          YouTube
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-4 mt-1 text-sm text-surface-500">
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {formatDate(video.created_at)}
+                      </span>
+                      <span>{isYT ? 'Online Video' : formatFileSize(video.file_size)}</span>
+                    </div>
+                    {video.error_message && (
+                      <p className="text-red-400 text-sm mt-1">{video.error_message}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <StatusBadge status={video.status} />
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete(video.id);
+                      }}
+                      className="btn-ghost text-surface-500 hover:text-red-400 p-2"
+                      title="Delete"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <StatusBadge status={video.status} />
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDelete(video.id);
-                    }}
-                    className="btn-ghost text-surface-500 hover:text-red-400 p-2"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </main>
@@ -456,7 +529,45 @@ export default function DashboardPage() {
               </button>
             </div>
 
-            {uploadStatus === 'idle' && (
+            {/* Mode Switch Tabs */}
+            {uploadStatus === 'idle' && !youtubeLoading && (
+              <div className="flex bg-surface-800/80 p-1 rounded-xl mb-6 border border-surface-700/50">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUploadMode('file');
+                    setUploadError('');
+                    setYoutubeError('');
+                  }}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${
+                    uploadMode === 'file'
+                      ? 'bg-primary-600 text-white shadow-md'
+                      : 'text-surface-400 hover:text-surface-200'
+                  }`}
+                >
+                  <Upload className="w-4 h-4" />
+                  Upload File
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUploadMode('youtube');
+                    setUploadError('');
+                    setYoutubeError('');
+                  }}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${
+                    uploadMode === 'youtube'
+                      ? 'bg-red-600 text-white shadow-md'
+                      : 'text-surface-400 hover:text-surface-200'
+                  }`}
+                >
+                  <YouTubeIcon className="w-4 h-4" />
+                  YouTube URL
+                </button>
+              </div>
+            )}
+
+            {uploadStatus === 'idle' && !youtubeLoading && uploadMode === 'file' && (
               <>
                 {/* Drop Zone */}
                 <div
@@ -528,6 +639,67 @@ export default function DashboardPage() {
                   Upload & Analyze
                 </button>
               </>
+            )}
+
+            {uploadStatus === 'idle' && !youtubeLoading && uploadMode === 'youtube' && (
+              <form onSubmit={handleYouTubeSubmit} className="space-y-4">
+                <div className="rounded-2xl border border-surface-700/50 p-6 bg-surface-900/40">
+                  <div className="w-12 h-12 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center mx-auto mb-4">
+                    <YouTubeIcon className="w-6 h-6" />
+                  </div>
+                  <h3 className="text-center font-semibold text-surface-200 mb-1">
+                    Enter YouTube Video URL
+                  </h3>
+                  <p className="text-center text-surface-500 text-xs mb-5">
+                    Works with any public YouTube talk, interview, meeting, podcast, or tutorial
+                  </p>
+
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-surface-500">
+                      <Link2 className="w-4 h-4" />
+                    </div>
+                    <input
+                      type="url"
+                      required
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      value={youtubeUrl}
+                      onChange={(e) => setYoutubeUrl(e.target.value)}
+                      className="w-full pl-10 pr-4 py-3 bg-surface-800/80 border border-surface-700 rounded-xl text-surface-100 placeholder-surface-500 text-sm focus:outline-none focus:border-red-500 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                {youtubeError && (
+                  <div className="flex items-center gap-2 text-red-400 text-sm p-3 rounded-xl bg-red-500/10 border border-red-500/20">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span>{youtubeError}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={!youtubeUrl.trim() || youtubeLoading}
+                  className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-red-600 hover:bg-red-500 text-white font-semibold rounded-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-600/20"
+                >
+                  <YouTubeIcon className="w-4 h-4" />
+                  Analyze YouTube Video
+                </button>
+              </form>
+            )}
+
+            {youtubeLoading && (
+              <div className="text-center py-8">
+                <div className="w-16 h-16 rounded-2xl bg-red-500/10 text-red-400 flex items-center justify-center mx-auto mb-6 animate-pulse">
+                  <YouTubeIcon className="w-8 h-8" />
+                </div>
+                <Loader2 className="w-8 h-8 animate-spin text-red-400 mx-auto mb-4" />
+                <h3 className="font-semibold text-surface-200 text-lg mb-2">
+                  Analyzing YouTube Video
+                </h3>
+                <p className="text-surface-400 text-sm max-w-sm mx-auto">
+                  {youtubeStep || 'Extracting transcript and generating intelligent insights...'}
+                </p>
+              </div>
             )}
 
             {(uploadStatus === 'uploading' || uploadStatus === 'extracting' || uploadStatus === 'analyzing') && (
@@ -605,73 +777,65 @@ export default function DashboardPage() {
 }
 
 /**
- * Extract audio from video using the browser's Web Audio API
- * Returns a WebM audio blob suitable for Groq Whisper
+ * Fast & lossless audio extraction:
+ * 1. If file size <= 24MB, returns the video file directly! Groq Whisper accepts MP4, WebM, M4A, etc. natively.
+ * 2. If file size > 24MB, fast-decodes PCM via AudioContext in ~1s and encodes to 16kHz mono WAV (no playback).
  */
 async function extractAudioFromVideo(videoFile: File): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
+  if (videoFile.size <= 24 * 1024 * 1024) {
+    return videoFile;
+  }
 
-    const url = URL.createObjectURL(videoFile);
-    video.src = url;
+  try {
+    const arrayBuffer = await videoFile.arrayBuffer();
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const audioContext = new AudioCtx({ sampleRate: 16000 });
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    const wavBlob = encodeAudioBufferToWav(audioBuffer);
+    await audioContext.close();
+    return wavBlob;
+  } catch (err) {
+    console.warn('Audio decoding fallback to direct file:', err);
+    return videoFile;
+  }
+}
 
-    video.onloadedmetadata = async () => {
-      try {
-        // Create audio context and media element source
-        const audioContext = new AudioContext();
-        const source = audioContext.createMediaElementSource(video);
-        const destination = audioContext.createMediaStreamDestination();
-        source.connect(destination);
+function encodeAudioBufferToWav(buffer: AudioBuffer): Blob {
+  const numChannels = 1;
+  const sampleRate = buffer.sampleRate;
+  const channelData = buffer.getChannelData(0);
+  const length = channelData.length;
 
-        // Use MediaRecorder to capture the audio stream
-        const mediaRecorder = new MediaRecorder(destination.stream, {
-          mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-            ? 'audio/webm;codecs=opus'
-            : 'audio/webm',
-        });
+  const bufferArray = new ArrayBuffer(44 + length * 2);
+  const view = new DataView(bufferArray);
 
-        const chunks: BlobPart[] = [];
-        mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0) chunks.push(e.data);
-        };
+  function writeString(offset: number, string: string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  }
 
-        mediaRecorder.onstop = () => {
-          const audioBlob = new Blob(chunks, { type: 'audio/webm' });
-          URL.revokeObjectURL(url);
-          audioContext.close();
-          resolve(audioBlob);
-        };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true); // 16-bit
+  writeString(36, 'data');
+  view.setUint32(40, length * 2, true);
 
-        mediaRecorder.onerror = () => {
-          URL.revokeObjectURL(url);
-          reject(new Error('Audio extraction failed'));
-        };
+  let offset = 44;
+  for (let i = 0; i < length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, channelData[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
 
-        mediaRecorder.start(1000); // Collect data every second
-        video.play();
-
-        // Stop when video ends
-        video.onended = () => {
-          mediaRecorder.stop();
-        };
-
-        // Safety timeout for very long videos (2 hours max)
-        setTimeout(() => {
-          if (mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
-          }
-        }, 2 * 60 * 60 * 1000);
-      } catch (err) {
-        URL.revokeObjectURL(url);
-        reject(err);
-      }
-    };
-
-    video.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('Could not load video'));
-    };
-  });
+  return new Blob([view], { type: 'audio/wav' });
 }

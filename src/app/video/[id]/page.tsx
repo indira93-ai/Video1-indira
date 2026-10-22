@@ -50,6 +50,7 @@ function VideoDetailContent() {
 
   // Video player
   const videoRef = useRef<HTMLVideoElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
 
   // Search
@@ -83,11 +84,13 @@ function VideoDetailContent() {
       if (!videoData) { router.push('/dashboard'); return; }
       setVideo(videoData);
 
-      // Get signed URL for video playback
-      const { data: urlData } = await supabase.storage
-        .from('videos')
-        .createSignedUrl(videoData.storage_path, 3600);
-      if (urlData) setVideoUrl(urlData.signedUrl);
+      // Get signed URL for video playback if it's a stored file
+      if (videoData.storage_path && !videoData.storage_path.startsWith('youtube:')) {
+        const { data: urlData } = await supabase.storage
+          .from('videos')
+          .createSignedUrl(videoData.storage_path, 3600);
+        if (urlData) setVideoUrl(urlData.signedUrl);
+      }
 
       const { data: analysisData } = await supabase
         .from('video_analyses')
@@ -121,8 +124,25 @@ function VideoDetailContent() {
     [analysis]
   );
 
+  const isYouTube =
+    video?.storage_path?.startsWith('youtube:') ||
+    video?.file_name?.includes('youtube.com') ||
+    video?.file_name?.includes('youtu.be');
+
+  const youtubeId = isYouTube
+    ? video?.storage_path?.startsWith('youtube:')
+      ? video.storage_path.replace('youtube:', '')
+      : video?.file_name?.match(/(?:youtu\.be\/|v=)([\w-]{11})/)?.[1]
+    : null;
+
   const seekTo = (time: number) => {
-    if (videoRef.current) {
+    if (isYouTube && iframeRef.current?.contentWindow) {
+      iframeRef.current.contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func: 'seekTo', args: [time, true] }),
+        '*'
+      );
+      setCurrentTime(time);
+    } else if (videoRef.current) {
       videoRef.current.currentTime = time;
       videoRef.current.play();
     }
@@ -398,7 +418,16 @@ function VideoDetailContent() {
           <div className="flex flex-col gap-4">
             {/* Video Player */}
             <div className="glass-card overflow-hidden">
-              {videoUrl ? (
+              {isYouTube && youtubeId ? (
+                <iframe
+                  ref={iframeRef}
+                  src={`https://www.youtube.com/embed/${youtubeId}?enablejsapi=1`}
+                  title={video?.title || 'YouTube Video'}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                  className="w-full aspect-video bg-black"
+                />
+              ) : videoUrl ? (
                 <video
                   ref={videoRef}
                   src={videoUrl}
