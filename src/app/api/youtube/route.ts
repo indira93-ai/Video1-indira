@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
 import { YoutubeTranscript } from 'youtube-transcript';
+import { toFile } from 'groq-sdk';
+import { Ytdl } from '@distube/ytdl-core';
 
 const groq = getGroqClient();
 
@@ -21,6 +23,44 @@ function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+async function downloadYouTubeAudio(videoId: string): Promise<Buffer | null> {
+  try {
+    const ytdl = new Ytdl();
+    const stream = await ytdl.download(`https://www.youtube.com/watch?v=${videoId}`, {
+      filter: { hasAudio: true, hasVideo: false },
+      quality: 'lowestaudio',
+    });
+
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    const MAX_BYTES = 24 * 1024 * 1024; // 24MB cap for Groq Whisper limit
+
+    return new Promise((resolve) => {
+      stream.on('data', (chunk: Buffer) => {
+        if (totalBytes + chunk.length <= MAX_BYTES) {
+          chunks.push(chunk);
+          totalBytes += chunk.length;
+        } else {
+          stream.destroy();
+          resolve(Buffer.concat(chunks));
+        }
+      });
+
+      stream.on('end', () => {
+        resolve(chunks.length > 0 ? Buffer.concat(chunks) : null);
+      });
+
+      stream.on('error', (err) => {
+        console.warn('ytdl audio stream warning:', err.message);
+        resolve(chunks.length > 0 ? Buffer.concat(chunks) : null);
+      });
+    });
+  } catch (err) {
+    console.warn('downloadYouTubeAudio error:', err);
+    return null;
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -64,28 +104,54 @@ export async function POST(request: NextRequest) {
       console.warn('oEmbed fetch error:', e);
     }
 
-    // Step 2: Fetch transcript from YouTube
+    // Step 2: Fetch transcript from YouTube captions, or fallback to Groq Whisper audio transcription
     let rawSegments: Array<{ text: string; duration: number; offset: number }> = [];
+
+    // Attempt 1: Fast YouTube captions (English)
     try {
       rawSegments = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
     } catch {
-      // Fallback to default/any language
+      // Attempt 2: Fast YouTube captions (any language)
       try {
         rawSegments = await YoutubeTranscript.fetchTranscript(videoId);
-      } catch (err) {
-        return NextResponse.json(
-          {
-            error:
-              'Could not retrieve a transcript for this YouTube video. The video may not have captions/subtitles enabled, or transcripts are restricted.',
-          },
-          { status: 422 }
-        );
+      } catch {
+        console.log('YouTube captions unavailable or restricted. Falling back to Groq Whisper audio transcription...');
+      }
+    }
+
+    // Attempt 3: If no captions exist on YouTube, stream the video audio and transcribe with Groq Whisper!
+    if (!rawSegments || rawSegments.length === 0) {
+      const audioBuffer = await downloadYouTubeAudio(videoId);
+      if (audioBuffer && audioBuffer.length > 0) {
+        try {
+          const audioFile = await toFile(audioBuffer, 'audio.m4a', { type: 'audio/m4a' });
+          const transcription = await groq.audio.transcriptions.create({
+            file: audioFile,
+            model: 'whisper-large-v3',
+            response_format: 'verbose_json',
+            timestamp_granularities: ['segment'],
+          });
+
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const whisperSegments = (transcription as any).segments || [];
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          rawSegments = whisperSegments.map((s: any) => ({
+            text: s.text || '',
+            duration: Math.max(1000, Math.round(((s.end || 0) - (s.start || 0)) * 1000)),
+            offset: Math.round((s.start || 0) * 1000),
+          }));
+        } catch (whisperErr) {
+          console.error('Groq Whisper audio transcription fallback error:', whisperErr);
+        }
       }
     }
 
     if (!rawSegments || rawSegments.length === 0) {
       return NextResponse.json(
-        { error: 'The transcript for this YouTube video is empty or unavailable.' },
+        {
+          error:
+            'Unable to process this YouTube video. The video may be private, age-restricted, or blocked from embedding. Please ensure the video is public.',
+        },
         { status: 422 }
       );
     }
