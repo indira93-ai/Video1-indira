@@ -1,10 +1,11 @@
-# VideoSynopsis AI - Setup Guide
+# VideoSynopsis AI - Complete Setup & Deployment Guide
 
 ## 📋 Prerequisites
 - Node.js 18+ installed
 - A Supabase account ([supabase.com](https://supabase.com))
-- A Groq API key ([console.groq.com](https://console.groq.com))
-- A Google Cloud project for OAuth
+- A Groq Cloud API key ([console.groq.com](https://console.groq.com))
+- A Google Cloud project for OAuth authentication
+- A GitHub account and Vercel account
 
 ---
 
@@ -13,15 +14,17 @@
 ### 1.1 Create a Supabase Project
 1. Go to [supabase.com/dashboard](https://supabase.com/dashboard)
 2. Click **New Project**
-3. Choose a name, password, and region
+3. Choose a project name, database password, and your preferred region
 
 ### 1.2 Run the Database Migration
 1. Go to **SQL Editor** in your Supabase Dashboard
-2. Open the file `supabase-setup.sql` from this project
-3. Copy the entire SQL content and paste it into the SQL Editor
-4. Click **Run** — this creates all tables, RLS policies, storage bucket, and triggers
+2. Open the file `supabase-setup.sql` in this project
+3. Paste the entire SQL script into the editor and click **Run**
+   - Creates the `profiles`, `videos`, and `video_analyses` tables
+   - Creates the `videos` storage bucket with security policies
+   - Configures triggers for auto-creating user profiles on signup
 
-### 1.3 Get Your Supabase Keys
+### 1.3 Obtain Supabase API Keys
 1. Go to **Project Settings → API**
 2. Copy:
    - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
@@ -34,132 +37,97 @@
 
 ### 2.1 Create Google OAuth Credentials
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or use an existing one)
-3. Go to **APIs & Services → Credentials**
+2. Create or select a project
+3. Navigate to **APIs & Services → Credentials**
 4. Click **Create Credentials → OAuth 2.0 Client ID**
-5. Application type: **Web application**
-6. Add Authorized redirect URI:
+5. Select Application type: **Web application**
+6. Under **Authorized redirect URIs**, add your Supabase callback URL:
    ```
    https://<YOUR_SUPABASE_PROJECT_REF>.supabase.co/auth/v1/callback
    ```
-   (Find your project ref in the Supabase URL, e.g., `abcdefghij.supabase.co`)
-7. Copy the **Client ID** and **Client Secret**
+   *(Replace `<YOUR_SUPABASE_PROJECT_REF>` with your Supabase reference from Project Settings)*
+7. Copy the generated **Client ID** and **Client Secret**
 
-### 2.2 Configure Google Provider in Supabase
+### 2.2 Enable Google Provider in Supabase
 1. In Supabase Dashboard, go to **Authentication → Providers**
-2. Find **Google** and enable it
+2. Enable **Google**
 3. Paste your **Client ID** and **Client Secret**
-4. Save
+4. Click **Save**
 
 ---
 
 ## 🤖 Step 3: Get Groq API Key
 
 1. Go to [console.groq.com/keys](https://console.groq.com/keys)
-2. Create a new API key
-3. Copy it for the next step
+2. Click **Create API Key**
+3. Copy the key (starts with `gsk_...`)
 
 ---
 
-## ⚙️ Step 4: Configure Environment Variables
+## ⚙️ Step 4: Local Environment Configuration
 
-Open `.env.local` in the project root and fill in your values:
+Copy `.env.example` to `.env.local` and add your keys:
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=https://yourproject.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key_here
-GROQ_API_KEY=gsk_your_groq_key_here
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+GROQ_API_KEY=gsk_your_groq_api_key
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
----
-
-## 🚀 Step 5: Run Locally
-
+Start the application locally:
 ```bash
 npm install
 npm run dev
 ```
-
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:3000](http://localhost:3000).
 
 ---
 
-## ☁️ Step 6: Deploy to Vercel
+## ☁️ Step 5: GitHub & Vercel Deployment
 
-### 6.1 Push to GitHub
+### 5.1 Push to GitHub
+Run the following terminal commands:
 ```bash
-git init
 git add .
-git commit -m "Initial commit: VideoSynopsis AI"
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
+git commit -m "Complete VideoSynopsis AI ready for Vercel deployment"
+git branch -M main
+git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
 git push -u origin main
 ```
 
-### 6.2 Import to Vercel
-1. Go to [vercel.com/new](https://vercel.com/new)
-2. Import your GitHub repository
-3. Add the same environment variables from `.env.local` in Vercel's project settings
-4. **Important**: Change `NEXT_PUBLIC_APP_URL` to your Vercel deployment URL
-5. Deploy!
+### 5.2 Deploy on Vercel
+1. Log in to [vercel.com](https://vercel.com) and click **Add New... → Project**.
+2. Select your GitHub repository and click **Import**.
+3. Under **Environment Variables**, add the 5 keys:
+   - `NEXT_PUBLIC_SUPABASE_URL`: `https://your-project.supabase.co`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: `your_anon_key`
+   - `SUPABASE_SERVICE_ROLE_KEY`: `your_service_role_key`
+   - `GROQ_API_KEY`: `gsk_your_groq_api_key`
+   - `NEXT_PUBLIC_APP_URL`: `https://your-app-name.vercel.app`
+4. Click **Deploy**. Vercel will build and launch your production site.
 
-### 6.3 Update Google OAuth Redirect
-After deploying, add your Vercel URL as an additional authorized redirect URI in Google Cloud Console:
-```
-https://your-app.vercel.app/auth/callback
-```
-
-And update the Supabase site URL:
-1. Go to Supabase Dashboard → **Authentication → URL Configuration**
-2. Set **Site URL** to your Vercel deployment URL
-3. Add `https://your-app.vercel.app/**` to **Redirect URLs**
-
----
-
-## 📁 Project Structure
-
-```
-video/
-├── .env.local              # Your environment variables
-├── .env.example            # Example env file (safe to commit)
-├── supabase-setup.sql      # Database migration script
-├── next.config.ts          # Next.js configuration
-├── src/
-│   ├── middleware.ts        # Auth session management
-│   ├── lib/
-│   │   ├── supabase/
-│   │   │   ├── client.ts    # Browser Supabase client
-│   │   │   ├── server.ts    # Server Supabase client
-│   │   │   └── middleware.ts # Auth middleware helper
-│   │   ├── types.ts         # TypeScript definitions
-│   │   └── export.ts        # Export utilities (TXT, SRT, VTT, MD)
-│   └── app/
-│       ├── layout.tsx       # Root layout with fonts & background
-│       ├── globals.css      # Design system & component styles
-│       ├── page.tsx         # Landing page
-│       ├── login/page.tsx   # Google OAuth login
-│       ├── auth/callback/   # OAuth callback handler
-│       ├── dashboard/page.tsx # Video list & upload
-│       ├── video/[id]/page.tsx # Analysis viewer
-│       └── api/
-│           ├── analyze/     # Transcription & AI analysis
-│           └── chat/        # AI Q&A about videos
-```
+### 5.3 Connect Production URL to Supabase & Google OAuth
+Once Vercel assigns your production domain (e.g. `https://your-app.vercel.app`):
+1. **Supabase Dashboard**:
+   - Go to **Authentication → URL Configuration**
+   - Set **Site URL** to `https://your-app.vercel.app`
+   - In **Redirect URLs**, add:
+     - `https://your-app.vercel.app/**`
+     - `https://your-app.vercel.app/auth/callback`
+   - Save changes.
+2. **Google Cloud Console**:
+   - In your OAuth 2.0 Client ID settings, verify your Supabase redirect URI is present.
+   *(Since Supabase handles the Google redirect directly, you do NOT need to add Vercel domain to Google Cloud Console unless using direct Google SDK).*
 
 ---
 
-## 🎯 Features
+## 🎯 Verified Features & APIs
 
-- ✅ Google OAuth login via Gmail
-- ✅ Drag & drop video upload (MP4, WebM, MOV, MKV — up to 5GB)
-- ✅ AI transcription via Groq Whisper Large v3
-- ✅ AI synopsis & meeting analysis via Groq Llama 3.3 70B
-- ✅ Speaker diarization with rename capability
-- ✅ Synced video player with click-to-seek transcript
-- ✅ Full-text transcript search with highlighting
-- ✅ Meeting notes: decisions, action items, unresolved questions
-- ✅ Multi-format export: TXT, PDF, SRT, VTT, Markdown
-- ✅ AI Q&A chat about video content
-- ✅ Row Level Security — users only see their own videos
-- ✅ Works locally and on Vercel
+- **Video Upload**: Fast in-browser audio extraction + Supabase storage upload.
+- **YouTube Link Processing**: Dual-mode extraction (captions + Whisper stream fallback).
+- **Groq AI Engine**: Transcription with `whisper-large-v3` + dynamic LLM selection.
+- **Live Subtitles**: Real-time floating overlay with multi-language instant translation (English, Telugu, Hindi, Tamil, etc.).
+- **Exports**: PDF report generation, SRT, VTT, Markdown, and TXT files.
+- **Vercel Safe**: Pre-configured `vercel.json`, safe environment fallback during build, clean Next.js 16 build passing with 0 errors.
