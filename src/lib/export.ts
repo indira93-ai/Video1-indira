@@ -132,6 +132,38 @@ export function exportToSrt(segments: TranscriptSegment[], mapping: Record<strin
 }
 
 /**
+ * Export clean subtitles as plain text with timestamps
+ */
+export function exportSubtitlesOnlyTxt(
+  segments: TranscriptSegment[],
+  mapping?: Record<string, string>,
+  language?: string
+): string {
+  let output = `Subtitles (${language || 'Original'})\n${'='.repeat(40)}\n\n`;
+  segments.forEach((seg) => {
+    const speaker = mapping ? getSpeakerName(seg.speaker, mapping) : seg.speaker;
+    output += `[${formatTimestamp(seg.start)} - ${formatTimestamp(seg.end)}] ${speaker ? speaker + ': ' : ''}${seg.text}\n`;
+  });
+  return output;
+}
+
+/**
+ * Export subtitles as clean SRT
+ */
+export function exportSubtitlesOnlySrt(
+  segments: TranscriptSegment[],
+  mapping?: Record<string, string>
+): string {
+  return segments
+    .map((seg, i) => {
+      const speaker = mapping ? getSpeakerName(seg.speaker, mapping) : '';
+      const text = speaker ? `${speaker}: ${seg.text}` : seg.text;
+      return `${i + 1}\n${formatSrtTimestamp(seg.start)} --> ${formatSrtTimestamp(seg.end)}\n${text}\n`;
+    })
+    .join('\n');
+}
+
+/**
  * Export transcript as WebVTT subtitle format
  */
 export function exportToVtt(segments: TranscriptSegment[], mapping: Record<string, string>): string {

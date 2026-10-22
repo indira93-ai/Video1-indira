@@ -10,6 +10,8 @@ import {
   exportToSrt,
   exportToVtt,
   exportToMarkdown,
+  exportSubtitlesOnlyTxt,
+  exportSubtitlesOnlySrt,
   downloadFile,
 } from '@/lib/export';
 import {
@@ -32,7 +34,24 @@ import {
   Loader2,
   AlertCircle,
   BookOpen,
+  Globe,
 } from 'lucide-react';
+
+export const SUBTITLE_LANGUAGES = [
+  { code: 'en', name: 'English', native: 'English' },
+  { code: 'te', name: 'Telugu', native: 'తెలుగు' },
+  { code: 'hi', name: 'Hindi', native: 'हिन्दी' },
+  { code: 'ta', name: 'Tamil', native: 'தமிழ்' },
+  { code: 'kn', name: 'Kannada', native: 'ಕನ್ನಡ' },
+  { code: 'ml', name: 'Malayalam', native: 'മലയാളം' },
+  { code: 'mr', name: 'Marathi', native: 'मराठी' },
+  { code: 'bn', name: 'Bengali', native: 'বাংলা' },
+  { code: 'es', name: 'Spanish', native: 'Español' },
+  { code: 'fr', name: 'French', native: 'Français' },
+  { code: 'de', name: 'German', native: 'Deutsch' },
+  { code: 'ja', name: 'Japanese', native: '日本語' },
+  { code: 'ar', name: 'Arabic', native: 'العربية' },
+];
 
 type TabId = 'synopsis' | 'transcript' | 'meeting' | 'chat';
 
@@ -69,6 +88,13 @@ function VideoDetailContent() {
   // Export
   const [showExport, setShowExport] = useState(false);
 
+  // Subtitle & Multi-language state
+  const [selectedLanguage, setSelectedLanguage] = useState('English');
+  const [showSubtitles, setShowSubtitles] = useState(true);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [translationError, setTranslationError] = useState<string | null>(null);
+  const [translationsCache, setTranslationsCache] = useState<Record<string, TranscriptSegment[]>>({});
+
   useEffect(() => {
     const loadData = async () => {
       const { data: { user } } = await supabase.auth.getUser();
@@ -99,30 +125,43 @@ function VideoDetailContent() {
         .eq('user_id', user.id)
         .single();
 
-      if (analysisData) setAnalysis(analysisData);
+      if (analysisData) {
+        setAnalysis(analysisData);
+        setTranslationsCache({
+          English: analysisData.transcript_segments || [],
+        });
+      }
       setIsLoading(false);
     };
     loadData();
   }, [videoId, router, supabase]);
 
-  // Search transcript
-  useEffect(() => {
-    if (!analysis || !searchQuery.trim()) {
-      setSearchResults([]);
-      return;
-    }
-    const query = searchQuery.toLowerCase();
-    const results = analysis.transcript_segments.filter((seg) =>
-      seg.text.toLowerCase().includes(query) ||
-      getSpeakerName(seg.speaker).toLowerCase().includes(query)
-    );
-    setSearchResults(results);
-  }, [searchQuery, analysis]);
+  const currentSegments =
+    translationsCache[selectedLanguage] || analysis?.transcript_segments || [];
+
+  const activeSubtitle = currentSegments.find(
+    (seg) => currentTime >= seg.start && currentTime <= (seg.end || seg.start + 2.5)
+  );
 
   const getSpeakerName = useCallback(
     (speaker: string) => analysis?.speaker_mapping?.[speaker] || speaker,
     [analysis]
   );
+
+  // Search transcript with active language
+  useEffect(() => {
+    if (!currentSegments.length || !searchQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    const query = searchQuery.toLowerCase();
+    const results = currentSegments.filter(
+      (seg) =>
+        seg.text.toLowerCase().includes(query) ||
+        getSpeakerName(seg.speaker).toLowerCase().includes(query)
+    );
+    setSearchResults(results);
+  }, [searchQuery, currentSegments, getSpeakerName]);
 
   const isYouTube =
     video?.storage_path?.startsWith('youtube:') ||
@@ -152,6 +191,66 @@ function VideoDetailContent() {
     if (videoRef.current) {
       setCurrentTime(videoRef.current.currentTime);
     }
+  };
+
+  const handleLanguageChange = async (targetLang: string) => {
+    if (!analysis || targetLang === selectedLanguage) return;
+
+    if (targetLang === 'English') {
+      setSelectedLanguage('English');
+      return;
+    }
+
+    if (translationsCache[targetLang]) {
+      setSelectedLanguage(targetLang);
+      return;
+    }
+
+    setIsTranslating(true);
+    setTranslationError(null);
+
+    try {
+      const res = await fetch('/api/subtitles/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          segments: analysis.transcript_segments,
+          targetLanguage: targetLang,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to translate subtitles');
+      }
+
+      setTranslationsCache((prev) => ({
+        ...prev,
+        [targetLang]: data.segments,
+      }));
+      setSelectedLanguage(targetLang);
+    } catch (err) {
+      console.error('Translation error:', err);
+      setTranslationError(err instanceof Error ? err.message : 'Translation failed');
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  const handleDownloadSubtitleSrt = () => {
+    if (!currentSegments.length || !video) return;
+    const content = exportSubtitlesOnlySrt(currentSegments, analysis?.speaker_mapping);
+    downloadFile(content, `${video.title || 'subtitles'}-${selectedLanguage}.srt`, 'text/plain');
+  };
+
+  const handleDownloadSubtitleTxt = () => {
+    if (!currentSegments.length || !video) return;
+    const content = exportSubtitlesOnlyTxt(
+      currentSegments,
+      analysis?.speaker_mapping,
+      selectedLanguage
+    );
+    downloadFile(content, `${video.title || 'subtitles'}-${selectedLanguage}.txt`, 'text/plain');
   };
 
   const handleSpeakerRename = async (originalName: string) => {
@@ -416,8 +515,8 @@ function VideoDetailContent() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[calc(100vh-120px)]">
           {/* Left: Video Player + Speaker List */}
           <div className="flex flex-col gap-4">
-            {/* Video Player */}
-            <div className="glass-card overflow-hidden">
+            {/* Video Player Container */}
+            <div className="glass-card overflow-hidden relative group">
               {isYouTube && youtubeId ? (
                 <iframe
                   ref={iframeRef}
@@ -440,6 +539,96 @@ function VideoDetailContent() {
                   <p className="text-surface-500">Video not available</p>
                 </div>
               )}
+
+              {/* Subtitle Overlay (Works for uploaded videos, screen recordings & YouTube) */}
+              {showSubtitles && activeSubtitle && (
+                <div className="absolute bottom-12 left-1/2 -translate-x-1/2 w-[90%] max-w-2xl text-center pointer-events-none z-30 transition-all duration-150">
+                  <div className="inline-block bg-black/85 backdrop-blur-md text-white text-sm sm:text-base md:text-lg font-medium px-4 py-2 rounded-xl shadow-2xl border border-white/10 leading-snug">
+                    <span className="text-primary-300 text-xs uppercase tracking-wider block font-semibold mb-0.5">
+                      {getSpeakerName(activeSubtitle.speaker)}
+                    </span>
+                    {activeSubtitle.text}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Subtitles & Multi-Language Control Bar */}
+            <div className="glass-card p-3.5 flex flex-wrap items-center justify-between gap-3 border border-surface-700/50">
+              <div className="flex flex-wrap items-center gap-3">
+                {/* CC Toggle Button */}
+                <button
+                  onClick={() => setShowSubtitles((prev) => !prev)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-wider transition-all ${
+                    showSubtitles
+                      ? 'bg-primary-500/20 text-primary-300 border border-primary-500/40 shadow-sm'
+                      : 'bg-surface-800 text-surface-400 border border-surface-700 hover:text-surface-200'
+                  }`}
+                  title={showSubtitles ? 'Turn subtitles off' : 'Turn subtitles on'}
+                >
+                  <span className="font-mono text-[11px] px-1 py-0.2 rounded bg-black/40 border border-current font-bold">
+                    CC
+                  </span>
+                  <span>{showSubtitles ? 'Subtitles ON' : 'Subtitles OFF'}</span>
+                </button>
+
+                {/* Subtitle Language Dropdown */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-surface-400 flex items-center gap-1 font-medium">
+                    <Globe className="w-3.5 h-3.5 text-primary-400" />
+                    Language:
+                  </span>
+                  <select
+                    value={selectedLanguage}
+                    onChange={(e) => handleLanguageChange(e.target.value)}
+                    disabled={isTranslating}
+                    className="bg-surface-800 border border-surface-700 rounded-lg px-2.5 py-1.5 text-xs font-medium text-surface-200 focus:outline-none focus:border-primary-500 transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    {SUBTITLE_LANGUAGES.map((lang) => (
+                      <option key={lang.code} value={lang.name}>
+                        {lang.name} ({lang.native})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {isTranslating && (
+                  <div className="flex items-center gap-1.5 text-xs text-primary-400 animate-pulse">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Translating subtitles to {selectedLanguage}...</span>
+                  </div>
+                )}
+
+                {translationError && (
+                  <div className="text-xs text-red-400 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    <span>{translationError}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Subtitle Downloads */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-surface-400">Download:</span>
+                <button
+                  onClick={handleDownloadSubtitleSrt}
+                  disabled={!currentSegments.length}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-surface-800 hover:bg-surface-700 text-surface-200 border border-surface-700 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                  title="Download .SRT subtitle file for any media player"
+                >
+                  <Download className="w-3 h-3 text-primary-400" />
+                  SRT
+                </button>
+                <button
+                  onClick={handleDownloadSubtitleTxt}
+                  disabled={!currentSegments.length}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-surface-800 hover:bg-surface-700 text-surface-200 border border-surface-700 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                  title="Download plain text transcript"
+                >
+                  <FileText className="w-3 h-3 text-emerald-400" />
+                  TXT
+                </button>
+              </div>
             </div>
 
             {/* Speakers */}
@@ -642,7 +831,7 @@ function VideoDetailContent() {
               {/* Transcript Tab */}
               {activeTab === 'transcript' && (
                 <div className="space-y-1 fade-in">
-                  {(searchQuery ? searchResults : analysis.transcript_segments).map((seg) => {
+                  {(searchQuery ? searchResults : currentSegments).map((seg) => {
                     const isActive = currentTime >= seg.start && currentTime < seg.end;
                     const speakerColor = `hsl(${
                       (uniqueSpeakers.indexOf(seg.speaker) * 137.5) % 360
