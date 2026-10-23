@@ -40,11 +40,12 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Protect dashboard routes
+  // Protect dashboard routes (allow public routes: /, /login, /auth, /api)
   if (
     !user &&
     !request.nextUrl.pathname.startsWith('/login') &&
     !request.nextUrl.pathname.startsWith('/auth') &&
+    !request.nextUrl.pathname.startsWith('/api') &&
     request.nextUrl.pathname !== '/'
   ) {
     const url = request.nextUrl.clone();

@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
+import Link from 'next/link';
+import { createClient, signOutUser } from '@/lib/supabase/client';
 import {
   Sparkles,
   FileText,
@@ -14,30 +15,30 @@ import {
   Shield,
   Search,
   Video,
+  LogOut,
 } from 'lucide-react';
 
 export default function LandingPage() {
   const router = useRouter();
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
 
   useEffect(() => {
     const supabase = createClient();
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        router.push('/dashboard');
-      } else {
-        setIsLoading(false);
-      }
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setIsLoggedIn(!!session);
     });
-  }, [router]);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsLoggedIn(!!session);
+    });
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
+  const handleSignOut = async () => {
+    setIsLoggedIn(false);
+    await signOutUser();
+  };
 
   const features = [
     {
@@ -95,13 +96,36 @@ export default function LandingPage() {
             </div>
             <span className="text-xl font-bold gradient-text">VideoSynopsis AI</span>
           </div>
-          <button
-            onClick={() => router.push('/login')}
-            className="btn-primary text-sm"
-          >
-            Login
-            <ArrowRight className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3">
+            {isLoggedIn ? (
+              <>
+                <Link
+                  href="/dashboard"
+                  className="btn-primary text-sm"
+                >
+                  Dashboard
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+                <button
+                  onClick={handleSignOut}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-surface-300 hover:text-red-400 hover:bg-red-500/10 border border-surface-700/60 hover:border-red-500/30 text-xs sm:text-sm font-medium transition-all cursor-pointer"
+                  title="Sign out of your account"
+                  id="sign-out-button"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span className="hidden sm:inline">Sign Out</span>
+                </button>
+              </>
+            ) : (
+              <Link
+                href="/login"
+                className="btn-primary text-sm"
+              >
+                Create New Account
+                <ArrowRight className="w-4 h-4" />
+              </Link>
+            )}
+          </div>
         </div>
       </header>
 
@@ -123,17 +147,17 @@ export default function LandingPage() {
             summaries, speaker identification, action items, and searchable
             key moments — all in seconds.
           </p>
-          <div className="flex flex-col sm:flex-row gap-4 justify-center fade-in">
-            <button
-              onClick={() => router.push('/login')}
+          <div className="flex flex-col sm:flex-row gap-4 justify-center items-center fade-in">
+            <Link
+              href={isLoggedIn ? '/dashboard' : '/login'}
               className="btn-primary text-lg px-8 py-4"
             >
-              Start Analyzing Videos
+              {isLoggedIn ? 'Go to Dashboard' : 'Start Analyzing Videos'}
               <ArrowRight className="w-5 h-5" />
-            </button>
-            <div className="flex items-center gap-2 text-surface-500 text-sm">
+            </Link>
+            <div className="flex items-center gap-2 text-surface-500 text-sm ml-2">
               <Shield className="w-4 h-4" />
-              Secure Gmail Login · Free to Use
+              Secure Gmail Access · Free to Use
             </div>
           </div>
         </div>
@@ -218,7 +242,7 @@ export default function LandingPage() {
             VideoSynopsis AI
           </div>
           <p className="text-surface-600 text-sm">
-            © {new Date().getFullYear()} All rights reserved.
+            © 2026 All rights reserved.
           </p>
         </div>
       </footer>

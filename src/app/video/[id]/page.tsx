@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo, Suspense } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
+import { createClient, signOutUser } from '@/lib/supabase/client';
 import { VideoRecord, VideoAnalysis, TranscriptSegment } from '@/lib/types';
 import { formatTimestamp } from '@/lib/export';
 import {
@@ -35,6 +35,7 @@ import {
   AlertCircle,
   BookOpen,
   Globe,
+  LogOut,
 } from 'lucide-react';
 
 export const SUBTITLE_LANGUAGES = [
@@ -219,7 +220,7 @@ function VideoDetailContent() {
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.error || 'Failed to translate subtitles');
       }
@@ -292,7 +293,7 @@ function VideoDetailContent() {
         body: JSON.stringify({ videoId, question: userMessage }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       setChatMessages((prev) => [
         ...prev,
         { role: 'assistant', content: data.answer || data.error || 'No response' },
@@ -337,6 +338,10 @@ function VideoDetailContent() {
         break;
     }
     setShowExport(false);
+  };
+
+  const handleSignOut = async () => {
+    await signOutUser();
   };
 
   const handlePdfExport = async () => {
@@ -506,6 +511,16 @@ function VideoDetailContent() {
                 </div>
               )}
             </div>
+            {/* Sign Out */}
+            <button
+              onClick={handleSignOut}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-surface-300 hover:text-red-400 hover:bg-red-500/10 border border-surface-700/60 hover:border-red-500/30 text-xs sm:text-sm font-medium transition-all cursor-pointer"
+              title="Sign out of your account"
+              id="sign-out-button"
+            >
+              <LogOut className="w-4 h-4" />
+              <span className="hidden sm:inline">Sign Out</span>
+            </button>
           </div>
         </div>
       </header>

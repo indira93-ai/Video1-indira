@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
+import { createClient, signOutUser } from '@/lib/supabase/client';
 import { VideoRecord, Profile } from '@/lib/types';
 import {
   Sparkles,
@@ -130,8 +130,25 @@ export default function DashboardPage() {
         .from('profiles')
         .select('*')
         .eq('id', user.id)
-        .single();
-      setProfile(profileData);
+        .maybeSingle();
+
+      const realProfile: Profile = {
+        id: user.id,
+        email: profileData?.email || user.email || '',
+        full_name:
+          profileData?.full_name ||
+          user.user_metadata?.full_name ||
+          user.user_metadata?.name ||
+          user.email?.split('@')[0] ||
+          'User',
+        avatar_url:
+          profileData?.avatar_url ||
+          user.user_metadata?.avatar_url ||
+          user.user_metadata?.picture ||
+          '',
+        created_at: profileData?.created_at || user.created_at || new Date().toISOString(),
+      };
+      setProfile(realProfile);
       await fetchVideos();
       setIsLoading(false);
     };
@@ -147,8 +164,7 @@ export default function DashboardPage() {
   }, [videos, fetchVideos]);
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut();
-    router.push('/login');
+    await signOutUser();
   };
 
   const handleFileSelect = (file: File) => {
@@ -244,7 +260,7 @@ export default function DashboardPage() {
       });
 
       if (!response.ok) {
-        const err = await response.json();
+        const err = await response.json().catch(() => ({}));
         throw new Error(err.error || 'Analysis failed');
       }
 
@@ -281,7 +297,7 @@ export default function DashboardPage() {
         body: JSON.stringify({ url: youtubeUrl.trim() }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.error || 'Failed to analyze YouTube video');
       }
@@ -372,17 +388,30 @@ export default function DashboardPage() {
                 <img
                   src={profile.avatar_url}
                   alt={profile.full_name}
-                  className="w-8 h-8 rounded-full border-2 border-surface-700"
+                  className="w-8 h-8 rounded-full border-2 border-surface-700 object-cover"
                 />
               ) : (
-                <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center text-white text-sm font-semibold">
-                  {profile?.full_name?.charAt(0) || 'U'}
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-500 to-accent-600 flex items-center justify-center text-white text-sm font-semibold shadow-sm">
+                  {profile?.full_name?.charAt(0)?.toUpperCase() || 'U'}
                 </div>
               )}
-              <span className="text-sm text-surface-300 hidden md:inline">{profile?.full_name || profile?.email}</span>
+              <div className="hidden md:flex flex-col text-left">
+                <span className="text-sm font-semibold text-surface-200 leading-tight">
+                  {profile?.full_name}
+                </span>
+                <span className="text-xs text-surface-400 leading-tight">
+                  {profile?.email}
+                </span>
+              </div>
             </div>
-            <button onClick={handleSignOut} className="btn-ghost text-surface-400" title="Sign out">
+            <button
+              onClick={handleSignOut}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-surface-300 hover:text-red-400 hover:bg-red-500/10 border border-surface-700/60 hover:border-red-500/30 text-xs sm:text-sm font-medium transition-all cursor-pointer"
+              title="Sign out of your account"
+              id="sign-out-button"
+            >
               <LogOut className="w-4 h-4" />
+              <span className="hidden sm:inline">Sign Out</span>
             </button>
           </div>
         </div>
@@ -457,24 +486,13 @@ export default function DashboardPage() {
                 : 'Try a different search term'}
             </p>
             {videos.length === 0 && (
-              <div className="flex flex-col sm:flex-row gap-3 justify-center items-center">
-                <button
-                  onClick={() => setShowMeetingRecorder(true)}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-semibold rounded-xl shadow-lg shadow-rose-600/25 transition-all text-sm cursor-pointer"
-                >
-                  <span className="relative flex h-2.5 w-2.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-300 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white"></span>
-                  </span>
-                  <Video className="w-4 h-4" />
-                  Start Recording Meeting
-                </button>
+              <div className="flex justify-center items-center">
                 <button
                   onClick={() => setShowUpload(true)}
-                  className="btn-primary"
+                  className="btn-primary text-sm px-6 py-3"
                 >
                   <Upload className="w-4 h-4" />
-                  Upload Your First Video
+                  Upload Video
                 </button>
               </div>
             )}
@@ -588,17 +606,7 @@ export default function DashboardPage() {
                   <YouTubeIcon className="w-4 h-4" />
                   YouTube URL
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowUpload(false);
-                    setShowMeetingRecorder(true);
-                  }}
-                  className="flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium text-surface-400 hover:text-rose-300 hover:bg-rose-500/10 transition-all"
-                >
-                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
-                  Record Meeting
-                </button>
+
               </div>
             )}
 
