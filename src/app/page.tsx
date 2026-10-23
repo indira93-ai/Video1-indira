@@ -13,6 +13,7 @@ import {
   Zap,
   Shield,
   Search,
+  Video,
 } from 'lucide-react';
 
 export default function LandingPage() {
@@ -39,6 +40,12 @@ export default function LandingPage() {
   }
 
   const features = [
+    {
+      icon: <Video className="w-6 h-6 text-rose-400" />,
+      title: 'One-Click Meeting Recording',
+      description:
+        'Record Zoom, Google Meet & Teams meetings with your voice and computer system audio captured simultaneously.',
+    },
     {
       icon: <Sparkles className="w-6 h-6" />,
       title: 'AI-Powered Synopsis',

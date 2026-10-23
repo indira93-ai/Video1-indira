@@ -20,6 +20,7 @@ import {
   CloudUpload,
   Link2,
 } from 'lucide-react';
+import MeetingRecorder from '@/components/MeetingRecorder';
 
 function YouTubeIcon({ className = 'w-5 h-5' }: { className?: string }) {
   return (
@@ -91,6 +92,7 @@ export default function DashboardPage() {
   const [videos, setVideos] = useState<VideoRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showMeetingRecorder, setShowMeetingRecorder] = useState(false);
 
   // Upload state
   const [showUpload, setShowUpload] = useState(false);
@@ -340,7 +342,19 @@ export default function DashboardPage() {
             </div>
             <span className="text-xl font-bold gradient-text hidden sm:inline">VideoSynopsis AI</span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowMeetingRecorder(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-semibold rounded-xl shadow-lg shadow-rose-600/25 hover:scale-[1.02] active:scale-[0.98] transition-all text-sm cursor-pointer border border-rose-500/30"
+              title="One-click meeting recording with mic voice & computer system audio"
+            >
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-300 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white"></span>
+              </span>
+              <Video className="w-4 h-4" />
+              <span>Meeting Recording</span>
+            </button>
             <button
               onClick={() => {
                 setShowUpload(true);
@@ -443,13 +457,26 @@ export default function DashboardPage() {
                 : 'Try a different search term'}
             </p>
             {videos.length === 0 && (
-              <button
-                onClick={() => setShowUpload(true)}
-                className="btn-primary"
-              >
-                <Upload className="w-4 h-4" />
-                Upload Your First Video
-              </button>
+              <div className="flex flex-col sm:flex-row gap-3 justify-center items-center">
+                <button
+                  onClick={() => setShowMeetingRecorder(true)}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-semibold rounded-xl shadow-lg shadow-rose-600/25 transition-all text-sm cursor-pointer"
+                >
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-300 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white"></span>
+                  </span>
+                  <Video className="w-4 h-4" />
+                  Start Recording Meeting
+                </button>
+                <button
+                  onClick={() => setShowUpload(true)}
+                  className="btn-primary"
+                >
+                  <Upload className="w-4 h-4" />
+                  Upload Your First Video
+                </button>
+              </div>
             )}
           </div>
         ) : (
@@ -466,9 +493,8 @@ export default function DashboardPage() {
                     }
                   }}
                 >
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
-                    isYT ? 'bg-red-500/10 text-red-400' : 'bg-surface-700/50 text-surface-400'
-                  }`}>
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${isYT ? 'bg-red-500/10 text-red-400' : 'bg-surface-700/50 text-surface-400'
+                    }`}>
                     {isYT ? <YouTubeIcon className="w-6 h-6" /> : <FileVideo className="w-6 h-6" />}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -539,11 +565,10 @@ export default function DashboardPage() {
                     setUploadError('');
                     setYoutubeError('');
                   }}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${
-                    uploadMode === 'file'
-                      ? 'bg-primary-600 text-white shadow-md'
-                      : 'text-surface-400 hover:text-surface-200'
-                  }`}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${uploadMode === 'file'
+                    ? 'bg-primary-600 text-white shadow-md'
+                    : 'text-surface-400 hover:text-surface-200'
+                    }`}
                 >
                   <Upload className="w-4 h-4" />
                   Upload File
@@ -555,14 +580,24 @@ export default function DashboardPage() {
                     setUploadError('');
                     setYoutubeError('');
                   }}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${
-                    uploadMode === 'youtube'
-                      ? 'bg-red-600 text-white shadow-md'
-                      : 'text-surface-400 hover:text-surface-200'
-                  }`}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${uploadMode === 'youtube'
+                    ? 'bg-red-600 text-white shadow-md'
+                    : 'text-surface-400 hover:text-surface-200'
+                    }`}
                 >
                   <YouTubeIcon className="w-4 h-4" />
                   YouTube URL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowUpload(false);
+                    setShowMeetingRecorder(true);
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium text-surface-400 hover:text-rose-300 hover:bg-rose-500/10 transition-all"
+                >
+                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                  Record Meeting
                 </button>
               </div>
             )}
@@ -577,13 +612,12 @@ export default function DashboardPage() {
                   }}
                   onDragLeave={() => setIsDragging(false)}
                   onDrop={handleDrop}
-                  className={`border-2 border-dashed rounded-2xl p-10 text-center transition-all duration-300 ${
-                    isDragging
-                      ? 'border-primary-500 bg-primary-500/10'
-                      : uploadFile
+                  className={`border-2 border-dashed rounded-2xl p-10 text-center transition-all duration-300 ${isDragging
+                    ? 'border-primary-500 bg-primary-500/10'
+                    : uploadFile
                       ? 'border-emerald-500/50 bg-emerald-500/5'
                       : 'border-surface-600/50 hover:border-surface-500'
-                  }`}
+                    }`}
                 >
                   {uploadFile ? (
                     <div>
@@ -772,6 +806,16 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      {/* One-Click Meeting Recorder Modal */}
+      <MeetingRecorder
+        isOpen={showMeetingRecorder}
+        onClose={() => setShowMeetingRecorder(false)}
+        onSaved={async () => {
+          await fetchVideos();
+          setShowMeetingRecorder(false);
+        }}
+      />
     </div>
   );
 }
