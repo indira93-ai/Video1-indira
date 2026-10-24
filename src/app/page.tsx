@@ -23,6 +23,16 @@ export default function LandingPage() {
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
 
   useEffect(() => {
+    // If OAuth redirect lands on root with ?code=..., immediately forward to auth callback
+    if (typeof window !== 'undefined') {
+      const searchParams = new URLSearchParams(window.location.search);
+      const code = searchParams.get('code');
+      if (code) {
+        window.location.replace(`/auth/callback${window.location.search}`);
+        return;
+      }
+    }
+
     const supabase = createClient();
     supabase.auth.getSession().then(({ data: { session } }) => {
       setIsLoggedIn(!!session);
