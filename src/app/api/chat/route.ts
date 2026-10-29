@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server';
-import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
+import {
+  getGroqClient,
+  getSupportedGroqModel,
+  createSafeChatCompletion,
+  compressTranscriptForPrompt,
+} from '@/lib/groq';
 import { corsHeaders, handleOptions } from '@/lib/api-utils';
 
 const groq = getGroqClient();
@@ -47,13 +52,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Build context from transcript
-    const transcriptContext = (analysis.transcript_segments || [])
+    // Build bounded context from transcript
+    const rawTranscript = (analysis.transcript_segments || [])
       .map((seg: { start: number; speaker: string; text: string }) => {
         const speaker = analysis.speaker_mapping?.[seg.speaker] || seg.speaker;
         return `[${Math.floor(seg.start / 60)}:${Math.floor(seg.start % 60).toString().padStart(2, '0')}] ${speaker}: ${seg.text}`;
       })
       .join('\n');
+
+    const transcriptContext = compressTranscriptForPrompt(rawTranscript, 10000);
 
     const systemPrompt = `You are an AI assistant helping users understand a video they've uploaded. You have access to the complete transcript and analysis of the video.
 
@@ -68,14 +75,14 @@ ${transcriptContext}
 Answer the user's question based ONLY on the video content. Be specific and reference timestamps when relevant. If the answer isn't in the content, say so.`;
 
     const chatModel = await getSupportedGroqModel(groq);
-    const completion = await groq.chat.completions.create({
+    const completion = await createSafeChatCompletion(groq, {
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: question },
       ],
       model: chatModel,
       temperature: 0.4,
-      max_tokens: 1024,
+      max_tokens: 800,
     });
 
     const answer = completion.choices[0]?.message?.content || "Sorry, I couldn't generate an answer.";

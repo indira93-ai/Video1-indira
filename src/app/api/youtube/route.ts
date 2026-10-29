@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server';
-import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
+import {
+  getGroqClient,
+  getSupportedGroqModel,
+  createSafeChatCompletion,
+  compressTranscriptForPrompt,
+} from '@/lib/groq';
 import { YoutubeTranscript } from 'youtube-transcript';
 import { fetch as undiciFetch, Agent } from 'undici';
 import { toFile } from 'groq-sdk';
@@ -433,15 +438,8 @@ export async function POST(request: NextRequest) {
       })
       .join('\n');
 
-    // For very long transcripts, compress prompt context to stay safely within token limits
-    let promptTranscriptText = fullTranscriptText;
-    const MAX_PROMPT_CHARS = 35000;
-    if (fullTranscriptText.length > MAX_PROMPT_CHARS) {
-      const lines = fullTranscriptText.split('\n');
-      const step = Math.ceil(fullTranscriptText.length / MAX_PROMPT_CHARS);
-      const sampled = lines.filter((_, idx) => idx % step === 0);
-      promptTranscriptText = sampled.join('\n');
-    }
+    // Compress transcript context to safely stay within Groq's 8,000 TPM limit
+    const promptTranscriptText = compressTranscriptForPrompt(fullTranscriptText, 12000);
 
     // Step 5: Groq LLM Analysis
     const analysisPrompt = `You are an expert video and meeting analyst. Analyze the following YouTube video transcript titled "${videoTitle}" (Creator: ${authorName}).
@@ -477,11 +475,11 @@ IMPORTANT RULES:
 - Return ONLY valid JSON, no surrounding text`;
 
     const chatModel = await getSupportedGroqModel(groq);
-    const completion = await groq.chat.completions.create({
+    const completion = await createSafeChatCompletion(groq, {
       messages: [{ role: 'user', content: analysisPrompt }],
       model: chatModel,
       temperature: 0.3,
-      max_tokens: 4096,
+      max_tokens: 2000,
       response_format: { type: 'json_object' },
     });
 

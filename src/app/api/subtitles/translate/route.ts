@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthenticatedUser } from '@/lib/supabase/server';
-import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
+import { getGroqClient, getSupportedGroqModel, createSafeChatCompletion } from '@/lib/groq';
 import { TranscriptSegment } from '@/lib/types';
 import { corsHeaders, handleOptions } from '@/lib/api-utils';
 
@@ -55,8 +55,8 @@ export async function POST(request: NextRequest) {
 
     const chatModel = await getSupportedGroqModel(groq);
 
-    // Batch segments to avoid token truncation
-    const BATCH_SIZE = 35;
+    // Batch segments to keep tokens per request well under 1,000
+    const BATCH_SIZE = 20;
     const batches: Array<Array<{ id: string; text: string }>> = [];
 
     for (let i = 0; i < segments.length; i += BATCH_SIZE) {
@@ -70,12 +70,11 @@ export async function POST(request: NextRequest) {
 
     const translationMap: Record<string, string> = {};
 
-    await Promise.all(
-      batches.map(async (batch) => {
-        const fromInfo = sourceLanguage ? `from ${sourceLanguage} ` : 'from English ';
-        const systemMessage = `You are an expert subtitle translator. Translate English source text accurately into the user's selected dropdown language (${targetLanguage}). Maintain a natural, conversational tone that matches educational video content. Keep technical terms like "Two Minute Classroom" and "SMART method" clear or phonetically accurate in the target script, and ensure the translated lines tightly align with the original timestamps.`;
+    for (const batch of batches) {
+      const fromInfo = sourceLanguage ? `from ${sourceLanguage} ` : 'from English ';
+      const systemMessage = `You are an expert subtitle translator. Translate English source text accurately into the user's selected dropdown language (${targetLanguage}). Maintain a natural, conversational tone that matches educational video content. Keep technical terms like "Two Minute Classroom" and "SMART method" clear or phonetically accurate in the target script, and ensure the translated lines tightly align with the original timestamps.`;
 
-        const userPrompt = `Translate each item in the following JSON array ${fromInfo}into ${targetLanguage}.
+      const userPrompt = `Translate each item in the following JSON array ${fromInfo}into ${targetLanguage}.
 Maintain the exact same "id" and provide the natural translated subtitle text under "text".
 
 Requirements:
@@ -87,43 +86,43 @@ Requirements:
 Input:
 ${JSON.stringify(batch)}`;
 
-        try {
-          const res = await groq.chat.completions.create({
-            model: chatModel,
-            messages: [
-              { role: 'system', content: systemMessage },
-              { role: 'user', content: userPrompt },
-            ],
-            temperature: 0.2,
-            response_format: { type: 'json_object' },
-          });
+      try {
+        const res = await createSafeChatCompletion(groq, {
+          model: chatModel,
+          messages: [
+            { role: 'system', content: systemMessage },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 1500,
+          response_format: { type: 'json_object' },
+        });
 
-          const rawContent = res.choices[0]?.message?.content || '{}';
-          const cleaned = rawContent
-            .replace(/^```json\s*/i, '')
-            .replace(/^```\s*/i, '')
-            .replace(/\s*```$/i, '')
-            .trim();
+        const rawContent = res.choices[0]?.message?.content || '{}';
+        const cleaned = rawContent
+          .replace(/^```json\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim();
 
-          const parsed = JSON.parse(cleaned);
-          const list: Array<{ id: string; text: string }> = Array.isArray(parsed)
-            ? parsed
-            : Array.isArray(parsed?.translations)
-            ? parsed.translations
-            : Array.isArray(parsed?.subtitles)
-            ? parsed.subtitles
-            : [];
+        const parsed = JSON.parse(cleaned);
+        const list: Array<{ id: string; text: string }> = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.translations)
+          ? parsed.translations
+          : Array.isArray(parsed?.subtitles)
+          ? parsed.subtitles
+          : [];
 
-          list.forEach((item) => {
-            if (item.id && typeof item.text === 'string') {
-              translationMap[item.id] = item.text.trim();
-            }
-          });
-        } catch (batchErr) {
-          console.error(`Error translating batch to ${targetLanguage}:`, batchErr);
-        }
-      })
-    );
+        list.forEach((item) => {
+          if (item.id && typeof item.text === 'string') {
+            translationMap[item.id] = item.text.trim();
+          }
+        });
+      } catch (batchErr) {
+        console.error(`Error translating batch to ${targetLanguage}:`, batchErr);
+      }
+    }
 
     // Reconstruct full segments with translated text
     const translatedSegments: TranscriptSegment[] = segments.map((seg) => ({

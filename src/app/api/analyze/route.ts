@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server';
-import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
+import {
+  getGroqClient,
+  getSupportedGroqModel,
+  createSafeChatCompletion,
+  compressTranscriptForPrompt,
+} from '@/lib/groq';
 import { corsHeaders, handleOptions } from '@/lib/api-utils';
 import { toFile } from 'groq-sdk';
 
@@ -284,18 +289,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // 7. Format transcript for Groq LLM Analysis
+    // 7. Format transcript for Groq LLM Analysis (bounded to stay well within Groq 8000 TPM limit)
     const fullTranscriptText = cleanedSegments
       .map((seg) => `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${seg.text}`)
       .join('\n');
 
-    let promptTranscriptText = fullTranscriptText;
-    const MAX_PROMPT_CHARS = 35000;
-    if (fullTranscriptText.length > MAX_PROMPT_CHARS) {
-      const lines = fullTranscriptText.split('\n');
-      const step = Math.ceil(fullTranscriptText.length / MAX_PROMPT_CHARS);
-      promptTranscriptText = lines.filter((_, idx) => idx % step === 0).join('\n');
-    }
+    const promptTranscriptText = compressTranscriptForPrompt(fullTranscriptText, 12000);
 
     const analysisPrompt = `You are an expert video/meeting analyst. Analyze the following transcript.
 The transcript is in ${detectedLanguageName}.
@@ -331,11 +330,11 @@ IMPORTANT RULES:
 - Return ONLY valid JSON, no surrounding text`;
 
     const chatModel = await getSupportedGroqModel(groq);
-    const completion = await groq.chat.completions.create({
+    const completion = await createSafeChatCompletion(groq, {
       messages: [{ role: 'user', content: analysisPrompt }],
       model: chatModel,
       temperature: 0.3,
-      max_tokens: 4096,
+      max_tokens: 2000,
       response_format: { type: 'json_object' },
     });
 
