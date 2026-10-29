@@ -5,6 +5,7 @@ import {
   getSupportedGroqModel,
   createSafeChatCompletion,
   compressTranscriptForPrompt,
+  safeJsonParse,
 } from '@/lib/groq';
 import { corsHeaders, handleOptions } from '@/lib/api-utils';
 import { toFile } from 'groq-sdk';
@@ -294,21 +295,21 @@ export async function POST(request: NextRequest) {
       .map((seg) => `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${seg.text}`)
       .join('\n');
 
-    const promptTranscriptText = compressTranscriptForPrompt(fullTranscriptText, 12000);
+    const promptTranscriptText = compressTranscriptForPrompt(fullTranscriptText, 8000);
 
     const analysisPrompt = `You are an expert video/meeting analyst. Analyze the following transcript.
 The transcript is in ${detectedLanguageName}.
-Provide a comprehensive, executive-ready analysis in clear English.
+Provide a clear, high-quality analysis in English.
 
 TRANSCRIPT:
 ${promptTranscriptText}
 
-Respond with ONLY a valid JSON object (no markdown, no code fences) with the following structure:
+Respond with ONLY a valid JSON object (no markdown, no surrounding text) with the following structure:
 {
   "executive_summary": "A concise 2-3 sentence overview of the entire content",
-  "detailed_synopsis": "A detailed paragraph-form synopsis covering all main points discussed",
-  "topics": ["topic1", "topic2"],
-  "important_points": ["point1", "point2"],
+  "detailed_synopsis": "A focused 1-2 paragraph synopsis covering the main points discussed",
+  "topics": ["topic1", "topic2", "topic3"],
+  "important_points": ["point1", "point2", "point3"],
   "conclusions": "Summary of conclusions reached",
   "key_moments": [
     {"timestamp": 0, "title": "moment title", "description": "brief description"}
@@ -319,42 +320,39 @@ Respond with ONLY a valid JSON object (no markdown, no code fences) with the fol
     {"task": "task description", "assignee": "Speaker X", "deadline": "mentioned deadline or TBD", "priority": "high|medium|low"}
   ],
   "unresolved_questions": ["question1"],
-  "speakers": [
-    {"id": "Speaker 1", "segments": [0, 1, 2]}
-  ]
+  "speakers": ["Speaker 1"]
 }
 
 IMPORTANT RULES:
-- Identify distinct voices or dialogue cues if present
-- Assign segments to speakers using segment indices starting from 0
-- Return ONLY valid JSON, no surrounding text`;
+- Keep the response concise, informative, and properly formatted
+- Return ONLY valid JSON, no code fences`;
 
     const chatModel = await getSupportedGroqModel(groq);
     const completion = await createSafeChatCompletion(groq, {
       messages: [{ role: 'user', content: analysisPrompt }],
       model: chatModel,
       temperature: 0.3,
-      max_tokens: 2000,
+      max_tokens: 2500,
       response_format: { type: 'json_object' },
     });
 
-    const analysisText = completion.choices[0]?.message?.content || '{}';
-    let analysis: any;
-    try {
-      analysis = JSON.parse(analysisText);
-    } catch {
-      analysis = {};
-    }
+    const analysisText = completion.choices?.[0]?.message?.content || '{}';
+    const analysis: any = safeJsonParse(analysisText, {});
 
     // 8. Build speaker mapping
     const speakerAssignments = analysis.speakers || [];
     const segmentSpeakerMap: Record<number, string> = {};
 
-    speakerAssignments.forEach((speaker: { id: string; segments: number[] }) => {
-      (speaker.segments || []).forEach((segIdx: number) => {
-        segmentSpeakerMap[segIdx] = speaker.id;
+    if (Array.isArray(speakerAssignments)) {
+      speakerAssignments.forEach((speaker: any, idx: number) => {
+        if (speaker && typeof speaker === 'object' && Array.isArray(speaker.segments)) {
+          const spkId = speaker.id || `Speaker ${idx + 1}`;
+          speaker.segments.forEach((segIdx: number) => {
+            segmentSpeakerMap[segIdx] = spkId;
+          });
+        }
       });
-    });
+    }
 
     const transcriptSegments = cleanedSegments.map((seg, index: number) => ({
       id: `seg-${index}`,
@@ -364,7 +362,13 @@ IMPORTANT RULES:
       text: seg.text,
     }));
 
-    const uniqueSpeakers = [...new Set(transcriptSegments.map((s) => s.speaker))] as string[];
+    const rawSpeakerNames = Array.isArray(speakerAssignments)
+      ? speakerAssignments.map((s: any) => (typeof s === 'string' ? s : s?.id || 'Speaker 1'))
+      : ['Speaker 1'];
+    const uniqueSpeakers = [
+      ...new Set([...rawSpeakerNames, ...transcriptSegments.map((s) => s.speaker)]),
+    ] as string[];
+
     const speakerMapping: Record<string, string> = {
       _detected_language: detectedLanguageName,
       _language_code: detectedLanguageCode,

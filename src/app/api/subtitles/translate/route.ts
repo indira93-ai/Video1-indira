@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthenticatedUser } from '@/lib/supabase/server';
-import { getGroqClient, getSupportedGroqModel, createSafeChatCompletion } from '@/lib/groq';
+import {
+  getGroqClient,
+  getSupportedGroqModel,
+  createSafeChatCompletion,
+  safeJsonParse,
+} from '@/lib/groq';
 import { TranscriptSegment } from '@/lib/types';
 import { corsHeaders, handleOptions } from '@/lib/api-utils';
 
@@ -98,14 +103,8 @@ ${JSON.stringify(batch)}`;
           response_format: { type: 'json_object' },
         });
 
-        const rawContent = res.choices[0]?.message?.content || '{}';
-        const cleaned = rawContent
-          .replace(/^```json\s*/i, '')
-          .replace(/^```\s*/i, '')
-          .replace(/\s*```$/i, '')
-          .trim();
-
-        const parsed = JSON.parse(cleaned);
+        const rawContent = res.choices?.[0]?.message?.content || '{}';
+        const parsed: any = safeJsonParse(rawContent, {});
         const list: Array<{ id: string; text: string }> = Array.isArray(parsed)
           ? parsed
           : Array.isArray(parsed?.translations)

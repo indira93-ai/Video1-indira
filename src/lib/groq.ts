@@ -1,4 +1,5 @@
 import Groq from 'groq-sdk';
+import { jsonrepair } from 'jsonrepair';
 
 export function getGroqClient() {
   return new Groq({
@@ -61,12 +62,12 @@ export async function getSupportedGroqModel(groq: Groq): Promise<string> {
 }
 
 /**
- * Compresses video transcript to stay well within Groq's 8,000 TPM rate limit
+ * Compresses video transcript to stay safely within Groq's 8,000 TPM limit
  * while preserving key introduction, middle dialogue, and concluding remarks.
  */
 export function compressTranscriptForPrompt(
   transcript: string,
-  maxChars: number = 12000
+  maxChars: number = 8000
 ): string {
   if (!transcript || transcript.length <= maxChars) {
     return transcript || '';
@@ -77,8 +78,8 @@ export function compressTranscriptForPrompt(
   }
 
   const targetLines = Math.floor(lines.length * (maxChars / transcript.length));
-  const headCount = Math.max(3, Math.floor(targetLines * 0.2));
-  const tailCount = Math.max(3, Math.floor(targetLines * 0.2));
+  const headCount = Math.max(3, Math.floor(targetLines * 0.25));
+  const tailCount = Math.max(3, Math.floor(targetLines * 0.25));
   const middleCount = Math.max(4, targetLines - headCount - tailCount);
 
   const head = lines.slice(0, headCount);
@@ -98,23 +99,46 @@ export function compressTranscriptForPrompt(
 }
 
 /**
+ * Reliably parses JSON even if slightly truncated by using jsonrepair
+ */
+export function safeJsonParse<T = any>(raw: string, fallback: T): T {
+  if (!raw || typeof raw !== 'string') return fallback;
+  const cleaned = raw
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch {
+    try {
+      const repaired = jsonrepair(cleaned);
+      return JSON.parse(repaired) as T;
+    } catch {
+      return fallback;
+    }
+  }
+}
+
+/**
  * Resilient completion wrapper that clamps max_tokens to prevent 413/429 TPM limit errors
- * and automatically retries with a fallback model or reduced token count if rate limited.
+ * and automatically retries with a fallback model or without strict json_object validation if needed.
  */
 export async function createSafeChatCompletion(
   groq: Groq,
   options: any
 ): Promise<any> {
-  // Cap max_tokens at 2000 to prevent artificially exhausting Groq's 8000 TPM limit
-  const maxTokens = Math.min(options.max_tokens || 2000, 2048);
+  const maxTokens = Math.min(options.max_tokens || 2500, 2800);
   const primaryModel = options.model || (await getSupportedGroqModel(groq));
 
   const runWithModel = async (
     modelToUse: string,
-    tokensLimit: number
+    tokensLimit: number,
+    opts: any = options
   ): Promise<any> => {
     return (await groq.chat.completions.create({
-      ...options,
+      ...opts,
       model: modelToUse,
       max_tokens: tokensLimit,
       stream: false,
@@ -125,6 +149,26 @@ export async function createSafeChatCompletion(
     return await runWithModel(primaryModel, maxTokens);
   } catch (err: any) {
     const errorStr = (err?.message || '').toLowerCase();
+
+    // 1. Handle json_validate_failed (when max tokens was reached before closing the document)
+    const isJsonValidateFailed =
+      errorStr.includes('json_validate_failed') ||
+      errorStr.includes('failed to generate json') ||
+      errorStr.includes('failed to validate json');
+
+    if (isJsonValidateFailed) {
+      console.warn(
+        'Groq json_validate_failed encountered. Retrying without strict json_object enforcement...'
+      );
+      const { response_format, ...safeOptions } = options;
+      try {
+        return await runWithModel(primaryModel, 2500, safeOptions);
+      } catch (retryErr: any) {
+        return await runWithModel('openai/gpt-oss-20b', 2200, safeOptions);
+      }
+    }
+
+    // 2. Handle TPM / RPM rate limits
     const isRateOrSizeLimit =
       err?.status === 413 ||
       err?.status === 429 ||
@@ -135,7 +179,7 @@ export async function createSafeChatCompletion(
 
     if (isRateOrSizeLimit) {
       console.warn(
-        `Groq rate/size limit hit with ${primaryModel}, retrying with reduced tokens and fallback model...`
+        `Groq rate/size limit hit with ${primaryModel}, retrying with fallback model...`
       );
       // Wait 1.2s to clear transient token burst
       await new Promise((r) => setTimeout(r, 1200));
@@ -146,12 +190,13 @@ export async function createSafeChatCompletion(
           : 'openai/gpt-oss-120b';
 
       try {
-        return await runWithModel(fallbackModel, 1500);
+        return await runWithModel(fallbackModel, 1800);
       } catch (secondErr: any) {
-        console.warn(`Fallback to ${fallbackModel} failed, trying 1200 tokens on qwen/qwen3.8-27b...`);
-        return await runWithModel('qwen/qwen3.8-27b', 1200);
+        console.warn(`Fallback to ${fallbackModel} failed, trying 1500 tokens on qwen/qwen3.8-27b...`);
+        return await runWithModel('qwen/qwen3.8-27b', 1500);
       }
     }
+
     throw err;
   }
 }
