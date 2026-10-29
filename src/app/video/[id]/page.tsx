@@ -94,6 +94,7 @@ function VideoDetailContent() {
   const [isTranslating, setIsTranslating] = useState(false);
   const [translationError, setTranslationError] = useState<string | null>(null);
   const [translationsCache, setTranslationsCache] = useState<Record<string, TranscriptSegment[]>>({});
+  const activeTargetLangRef = useRef<string>('English');
 
   useEffect(() => {
     const loadData = async () => {
@@ -137,16 +138,35 @@ function VideoDetailContent() {
           Original: analysisData.transcript_segments || [],
         });
         setSelectedLanguage(originalLang);
+        activeTargetLangRef.current = originalLang;
       }
       setIsLoading(false);
     };
     loadData();
   }, [videoId, router, supabase]);
 
-  const currentSegments = useMemo(() => {
-    return translationsCache[selectedLanguage] || analysis?.transcript_segments || [];
-  }, [translationsCache, selectedLanguage, analysis?.transcript_segments]);
+  const originalLanguage = useMemo(() => {
+    return (
+      analysis?.speaker_mapping?._detected_language ||
+      analysis?.detected_language ||
+      'English'
+    );
+  }, [analysis]);
 
+  const isOriginalLanguage = useMemo(() => {
+    return selectedLanguage === 'Original' || selectedLanguage === originalLanguage;
+  }, [selectedLanguage, originalLanguage]);
+
+  // When a non-original language is selected, strictly use its translation cache.
+  // This immediately clears active English text from the container when switching languages.
+  const currentSegments = useMemo(() => {
+    if (isOriginalLanguage) {
+      return analysis?.transcript_segments || [];
+    }
+    return translationsCache[selectedLanguage] || [];
+  }, [translationsCache, selectedLanguage, isOriginalLanguage, analysis?.transcript_segments]);
+
+  // Dynamically match subtitle phrase corresponding to video's current timestamp
   const activeSubtitle = useMemo(() => {
     if (!currentSegments || currentSegments.length === 0) return null;
     return currentSegments.find(
@@ -156,12 +176,23 @@ function VideoDetailContent() {
     );
   }, [currentSegments, currentTime]);
 
+  // Check if original video has an active phrase spoken at the current timestamp
+  const hasActiveSourceAtCurrentTime = useMemo(() => {
+    const rawSegments = analysis?.transcript_segments;
+    if (!rawSegments || rawSegments.length === 0) return false;
+    return rawSegments.some(
+      (seg) =>
+        currentTime >= seg.start - 0.05 &&
+        currentTime <= Math.max(seg.end + 0.25, seg.start + 1.2)
+    );
+  }, [analysis?.transcript_segments, currentTime]);
+
   const getSpeakerName = useCallback(
     (speaker: string) => analysis?.speaker_mapping?.[speaker] || speaker,
     [analysis]
   );
 
-  // Memoized search results across active language segments (no setState / no infinite loop)
+  // Memoized search results across active language segments
   const searchResults = useMemo(() => {
     if (!currentSegments.length || !searchQuery.trim()) {
       return [];
@@ -185,6 +216,41 @@ function VideoDetailContent() {
       : video?.file_name?.match(/(?:youtu\.be\/|v=)([\w-]{11})/)?.[1]
     : null;
 
+  // Real-time synchronization with YouTube iframe player time updates
+  useEffect(() => {
+    if (!isYouTube) return;
+
+    const handleWindowMessage = (event: MessageEvent) => {
+      try {
+        let data = event.data;
+        if (typeof data === 'string') {
+          data = JSON.parse(data);
+        }
+        if (data?.event === 'infoDelivery' && data?.info?.currentTime !== undefined) {
+          setCurrentTime(data.info.currentTime);
+        }
+      } catch {
+        // ignore non-json messages
+      }
+    };
+
+    window.addEventListener('message', handleWindowMessage);
+
+    const pingInterval = setInterval(() => {
+      if (iframeRef.current?.contentWindow) {
+        iframeRef.current.contentWindow.postMessage(
+          JSON.stringify({ event: 'listening', id: youtubeId }),
+          '*'
+        );
+      }
+    }, 400);
+
+    return () => {
+      window.removeEventListener('message', handleWindowMessage);
+      clearInterval(pingInterval);
+    };
+  }, [isYouTube, youtubeId]);
+
   const seekTo = (time: number) => {
     if (isYouTube && iframeRef.current?.contentWindow) {
       iframeRef.current.contentWindow.postMessage(
@@ -204,27 +270,30 @@ function VideoDetailContent() {
     }
   };
 
+  // Immediate intercept: immediately clear active English text, update dropdown state,
+  // dynamically translate the active phrase for current timestamp, and cache translations.
   const handleLanguageChange = async (targetLang: string) => {
     if (!analysis || targetLang === selectedLanguage) return;
 
-    const originalLang =
-      analysis.speaker_mapping?._detected_language ||
-      analysis.detected_language ||
-      'English';
+    // 1. Immediately switch the language state so UI and overlay intercept in the same frame
+    setSelectedLanguage(targetLang);
+    activeTargetLangRef.current = targetLang;
+    setTranslationError(null);
 
-    // If switching back to original language
-    if (targetLang === originalLang || targetLang === 'Original') {
-      setSelectedLanguage(targetLang);
+    // If switching to original or language is already cached, switch is instantaneous!
+    if (
+      targetLang === originalLanguage ||
+      targetLang === 'Original' ||
+      (translationsCache[targetLang] && translationsCache[targetLang].length > 0)
+    ) {
+      setIsTranslating(false);
       return;
     }
 
-    if (translationsCache[targetLang]) {
-      setSelectedLanguage(targetLang);
-      return;
-    }
+    const allSourceSegments = analysis.transcript_segments || [];
+    if (!allSourceSegments.length) return;
 
     setIsTranslating(true);
-    setTranslationError(null);
 
     try {
       const {
@@ -237,31 +306,76 @@ function VideoDetailContent() {
         headers['Authorization'] = `Bearer ${session.access_token}`;
       }
 
+      // Fast-path: find the exact segment matching the video's current timestamp
+      const activeIdx = allSourceSegments.findIndex(
+        (seg) =>
+          currentTime >= seg.start - 0.05 &&
+          currentTime <= Math.max(seg.end + 0.25, seg.start + 1.2)
+      );
+
+      const activeSegment = activeIdx >= 0 ? allSourceSegments[activeIdx] : allSourceSegments[0];
+
+      // Immediately translate the active timestamp phrase so it renders dynamically in ~300ms
+      if (activeSegment) {
+        fetch('/api/subtitles/translate', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            segments: [activeSegment],
+            targetLanguage: targetLang,
+            sourceLanguage: originalLanguage,
+          }),
+        })
+          .then((res) => res.json())
+          .then((fastData) => {
+            if (activeTargetLangRef.current === targetLang && fastData?.segments?.length) {
+              setTranslationsCache((prev) => {
+                const currentList = prev[targetLang] ? [...prev[targetLang]] : [];
+                const mergedMap = new Map(currentList.map((s) => [s.id, s]));
+                fastData.segments.forEach((s: TranscriptSegment) => mergedMap.set(s.id, s));
+                return {
+                  ...prev,
+                  [targetLang]: Array.from(mergedMap.values()).sort((a, b) => a.start - b.start),
+                };
+              });
+            }
+          })
+          .catch((fastErr) => {
+            console.warn('Fast active subtitle phrase translation skipped:', fastErr);
+          });
+      }
+
+      // Full translation for all video segments
       const res = await fetch('/api/subtitles/translate', {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          segments: analysis.transcript_segments,
+          segments: allSourceSegments,
           targetLanguage: targetLang,
-          sourceLanguage: originalLang,
+          sourceLanguage: originalLanguage,
         }),
       });
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to translate subtitles');
+        throw new Error(data.error || `Failed to translate subtitles to ${targetLang}`);
       }
 
-      setTranslationsCache((prev) => ({
-        ...prev,
-        [targetLang]: data.segments,
-      }));
-      setSelectedLanguage(targetLang);
+      if (activeTargetLangRef.current === targetLang) {
+        setTranslationsCache((prev) => ({
+          ...prev,
+          [targetLang]: data.segments,
+        }));
+      }
     } catch (err) {
-      console.error('Translation error:', err);
-      setTranslationError(err instanceof Error ? err.message : 'Translation failed');
+      if (activeTargetLangRef.current === targetLang) {
+        console.error('Translation error:', err);
+        setTranslationError(err instanceof Error ? err.message : 'Translation failed');
+      }
     } finally {
-      setIsTranslating(false);
+      if (activeTargetLangRef.current === targetLang) {
+        setIsTranslating(false);
+      }
     }
   };
 
@@ -593,19 +707,43 @@ function VideoDetailContent() {
               )}
 
               {/* Subtitle Overlay (Works for uploaded videos, screen recordings & YouTube) */}
-              {showSubtitles && activeSubtitle && (
-                <div className="absolute bottom-12 left-1/2 -translate-x-1/2 w-[92%] max-w-2xl text-center pointer-events-none z-30 transition-all duration-150">
-                  <div className="inline-block bg-black/85 backdrop-blur-md text-white text-sm sm:text-base md:text-lg font-medium px-4 py-2.5 rounded-xl shadow-2xl border border-white/10 leading-snug">
-                    <div className="flex items-center justify-center gap-2 mb-0.5">
-                      <span className="text-primary-300 text-xs uppercase tracking-wider font-semibold">
-                        {getSpeakerName(activeSubtitle.speaker)}
-                      </span>
-                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-white/10 text-surface-300 font-mono">
-                        {selectedLanguage}
-                      </span>
+              {/* Subtitle Overlay (Connected directly to dropdown language state) */}
+              {showSubtitles && (
+                <div
+                  id="video-subtitle-overlay"
+                  className="absolute bottom-12 left-1/2 -translate-x-1/2 w-[92%] max-w-2xl text-center pointer-events-none z-30 transition-all duration-150"
+                >
+                  {activeSubtitle ? (
+                    <div
+                      key={`${selectedLanguage}-${activeSubtitle.id}`}
+                      className="inline-block bg-black/85 backdrop-blur-md text-white text-sm sm:text-base md:text-lg font-medium px-4 py-2.5 rounded-xl shadow-2xl border border-white/10 leading-snug animate-fadeIn"
+                    >
+                      <div className="flex items-center justify-center gap-2 mb-0.5">
+                        <span className="text-primary-300 text-xs uppercase tracking-wider font-semibold">
+                          {getSpeakerName(activeSubtitle.speaker)}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-500/20 text-primary-300 font-mono font-bold border border-primary-500/30">
+                          {selectedLanguage}
+                        </span>
+                      </div>
+                      <p className="tracking-wide">{activeSubtitle.text}</p>
                     </div>
-                    <p className="tracking-wide">{activeSubtitle.text}</p>
-                  </div>
+                  ) : isTranslating && hasActiveSourceAtCurrentTime ? (
+                    <div
+                      key={`translating-${selectedLanguage}`}
+                      className="inline-block bg-black/85 backdrop-blur-md text-white text-xs sm:text-sm px-4 py-2 rounded-xl shadow-2xl border border-primary-500/30 leading-snug animate-pulse"
+                    >
+                      <div className="flex items-center justify-center gap-2 mb-0.5">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-500/20 text-primary-300 font-mono font-bold border border-primary-500/30">
+                          {selectedLanguage}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-center gap-2 text-primary-300 font-medium">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-primary-400" />
+                        <span>Rendering {selectedLanguage} subtitle...</span>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -636,15 +774,13 @@ function VideoDetailContent() {
                     Language:
                   </span>
                   <select
+                    id="subtitle-language-select"
                     value={selectedLanguage}
                     onChange={(e) => handleLanguageChange(e.target.value)}
-                    disabled={isTranslating}
-                    className="bg-surface-800 border border-surface-700 rounded-lg px-2.5 py-1.5 text-xs font-medium text-surface-200 focus:outline-none focus:border-primary-500 transition-colors disabled:opacity-50 cursor-pointer"
+                    className="bg-surface-800 border border-surface-700 rounded-lg px-2.5 py-1.5 text-xs font-medium text-surface-200 focus:outline-none focus:border-primary-500 transition-colors cursor-pointer"
                   >
                     {SUBTITLE_LANGUAGES.map((lang) => {
-                      const isOriginal =
-                        (analysis?.speaker_mapping?._detected_language || 'English') ===
-                        lang.name;
+                      const isOriginal = originalLanguage === lang.name;
                       return (
                         <option key={lang.code} value={lang.name}>
                           {lang.name} ({lang.native}) {isOriginal ? '• Original Spoken' : ''}
@@ -893,6 +1029,13 @@ function VideoDetailContent() {
               {/* Transcript Tab */}
               {activeTab === 'transcript' && (
                 <div className="space-y-1 fade-in">
+                  {isTranslating && currentSegments.length === 0 && (
+                    <div className="text-center py-12">
+                      <Loader2 className="w-8 h-8 text-primary-400 mx-auto mb-3 animate-spin" />
+                      <p className="text-surface-300 font-medium">Translating transcript to {selectedLanguage}...</p>
+                      <p className="text-xs text-surface-500 mt-1">Subtitles are synchronizing with video playback</p>
+                    </div>
+                  )}
                   {(searchQuery ? searchResults : currentSegments).map((seg) => {
                     const isActive = currentTime >= seg.start && currentTime < seg.end;
                     const speakerColor = `hsl(${
