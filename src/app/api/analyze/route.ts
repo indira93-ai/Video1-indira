@@ -77,34 +77,38 @@ export async function POST(request: NextRequest) {
       .eq('id', videoId);
 
     // 5. Prepare audio for Groq Whisper
-    // If the client provided an audio file in formData (small file < 3.5MB), use it.
-    // Otherwise, download directly from Supabase Storage (bypasses Vercel serverless request body limits).
     let whisperFile: any = null;
 
     if (audioFileFromClient && audioFileFromClient.size > 0) {
-      whisperFile = audioFileFromClient;
+      const audioBuffer = Buffer.from(await audioFileFromClient.arrayBuffer());
+      const fileName = audioFileFromClient.name || 'audio.wav';
+      const fileMime = audioFileFromClient.type || 'audio/wav';
+      whisperFile = await toFile(audioBuffer, fileName, { type: fileMime });
     } else {
-      // Check if extracted audio exists or download original video from Supabase Storage
       let downloadStoragePath = videoRecord.storage_path;
       const possibleAudioPath = `${videoRecord.storage_path}.audio.wav`;
 
-      // Check if the audio file exists
-      const { data: audioCheck } = await adminSupabase.storage
-        .from('videos')
-        .createSignedUrl(possibleAudioPath, 60);
+      let storageBlob: Blob | null = null;
 
-      if (audioCheck?.signedUrl) {
+      // Check if extracted audio exists first
+      const { data: audioBlob } = await adminSupabase.storage
+        .from('videos')
+        .download(possibleAudioPath);
+
+      if (audioBlob) {
+        storageBlob = audioBlob;
         downloadStoragePath = possibleAudioPath;
-      }
+      } else {
+        const { data: videoBlob, error: downloadError } = await adminSupabase.storage
+          .from('videos')
+          .download(videoRecord.storage_path);
 
-      const { data: storageBlob, error: downloadError } = await adminSupabase.storage
-        .from('videos')
-        .download(downloadStoragePath);
-
-      if (downloadError || !storageBlob) {
-        throw new Error(
-          `Unable to retrieve video from Supabase Storage: ${downloadError?.message || 'File missing'}`
-        );
+        if (downloadError || !videoBlob) {
+          throw new Error(
+            `Unable to retrieve video from Supabase Storage: ${downloadError?.message || 'File missing'}`
+          );
+        }
+        storageBlob = videoBlob;
       }
 
       const fileBuffer = Buffer.from(await storageBlob.arrayBuffer());
@@ -424,10 +428,14 @@ IMPORTANT RULES:
     const errorMsg = error instanceof Error ? error.message : 'Video analysis failed';
 
     if (activeVideoId) {
-      await adminSupabase
-        .from('videos')
-        .update({ status: 'error', error_message: errorMsg })
-        .eq('id', activeVideoId);
+      try {
+        await adminSupabase
+          .from('videos')
+          .update({ status: 'error', error_message: errorMsg })
+          .eq('id', activeVideoId);
+      } catch (dbErr) {
+        console.error('Failed to record error status in DB:', dbErr);
+      }
     }
 
     return NextResponse.json(

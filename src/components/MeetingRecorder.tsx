@@ -566,37 +566,34 @@ export default function MeetingRecorder({
         authHeaders['Authorization'] = `Bearer ${session.access_token}`;
       }
 
-      let response: Response;
-      if (audioBlobToSend && audioBlobToSend.size <= 3.5 * 1024 * 1024) {
-        const formData = new FormData();
-        formData.append('audio', audioBlobToSend, audioFileName);
-        formData.append('videoId', videoRecord.id);
-        formData.append('language', meetingLanguage);
-
-        response = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: authHeaders,
-          body: formData,
-        });
-      } else {
-        response = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: {
-            ...authHeaders,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            videoId: videoRecord.id,
-            language: meetingLanguage,
-          }),
-        });
-      }
+      // Send videoId as JSON so Vercel's 4.5MB request limit is NEVER exceeded,
+      // and the server directly streams from Supabase Storage.
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: {
+          ...authHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          videoId: videoRecord.id,
+          language: meetingLanguage,
+        }),
+      });
 
       if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}));
-        throw new Error(
-          errJson.error || `AI Analysis failed with server code ${response.status}`
-        );
+        let serverError = `AI Analysis failed with server code ${response.status}`;
+        try {
+          const text = await response.text();
+          try {
+            const errJson = JSON.parse(text);
+            if (errJson.error) serverError = errJson.error;
+          } catch {
+            if (text && text.length < 500) serverError = text;
+          }
+        } catch {
+          // ignore
+        }
+        throw new Error(serverError);
       }
 
       setSaveProgress(100);

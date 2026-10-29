@@ -239,13 +239,9 @@ export default function DashboardPage() {
 
       // If video file is large (> 20MB), extract audio in browser and upload directly to Supabase Storage
       // to keep it within Groq Whisper's 25MB limit without hitting Vercel's 4.5MB function payload limit.
-      let audioBlob: Blob | null = null;
-      let audioFileName = uploadFile.name;
-
       if (uploadFile.size > 20 * 1024 * 1024) {
         try {
-          audioBlob = await extractAudioFromVideo(uploadFile);
-          audioFileName = 'audio.wav';
+          const audioBlob = await extractAudioFromVideo(uploadFile);
           // Upload extracted audio to Supabase Storage directly
           await supabase.storage
             .from('videos')
@@ -256,8 +252,6 @@ export default function DashboardPage() {
         } catch (audioExtractErr) {
           console.warn('Audio extraction notice:', audioExtractErr);
         }
-      } else if (uploadFile.size <= 3.5 * 1024 * 1024) {
-        audioBlob = uploadFile;
       }
 
       setUploadStatus('analyzing');
@@ -271,35 +265,32 @@ export default function DashboardPage() {
         authHeaders['Authorization'] = `Bearer ${session.access_token}`;
       }
 
-      // If audioBlob is smaller than 3.5MB, it can be passed via FormData.
-      // Otherwise, we send videoId as JSON so Vercel's 4.5MB request limit is NEVER exceeded,
+      // Always send videoId as JSON so Vercel's 4.5MB request limit is NEVER exceeded,
       // and the server directly streams from Supabase Storage.
-      let response: Response;
-      if (audioBlob && audioBlob.size <= 3.5 * 1024 * 1024) {
-        const formData = new FormData();
-        formData.append('audio', audioBlob, audioFileName);
-        formData.append('videoId', videoRecord.id);
-
-        response = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: authHeaders,
-          body: formData,
-        });
-      } else {
-        response = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: {
-            ...authHeaders,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ videoId: videoRecord.id }),
-        });
-      }
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: {
+          ...authHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ videoId: videoRecord.id }),
+      });
 
       if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        const serverError =
-          err.error || `Server responded with ${response.status}: ${response.statusText}`;
+        let serverError = `Server responded with ${response.status}: ${response.statusText}`;
+        try {
+          const text = await response.text();
+          try {
+            const err = JSON.parse(text);
+            if (err.error) serverError = err.error;
+          } catch {
+            if (text && text.length < 500) {
+              serverError = text;
+            }
+          }
+        } catch {
+          // fallback
+        }
         throw new Error(serverError);
       }
 
