@@ -1,26 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server';
 import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
+import { corsHeaders, handleOptions } from '@/lib/api-utils';
 
 const groq = getGroqClient();
 
+export const maxDuration = 300;
+
+export async function OPTIONS() {
+  return handleOptions();
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    const { user, error: authError } = await getAuthenticatedUser(request);
+    const adminSupabase = createAdminClient();
 
     if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401, headers: corsHeaders() }
+      );
     }
 
-    const { videoId, question } = await request.json();
+    const { videoId, question } = await request.json().catch(() => ({}));
 
     if (!videoId || !question) {
-      return NextResponse.json({ error: 'Missing videoId or question' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Missing videoId or question' },
+        { status: 400, headers: corsHeaders() }
+      );
     }
 
     // Get the analysis for this video
-    const { data: analysis, error: fetchError } = await supabase
+    const { data: analysis, error: fetchError } = await adminSupabase
       .from('video_analyses')
       .select('*')
       .eq('video_id', videoId)
@@ -28,7 +41,10 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (fetchError || !analysis) {
-      return NextResponse.json({ error: 'Analysis not found' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Analysis not found' },
+        { status: 404, headers: corsHeaders() }
+      );
     }
 
     // Build context from transcript
@@ -62,14 +78,14 @@ Answer the user's question based ONLY on the video content. Be specific and refe
       max_tokens: 1024,
     });
 
-    const answer = completion.choices[0]?.message?.content || 'Sorry, I couldn\'t generate an answer.';
+    const answer = completion.choices[0]?.message?.content || "Sorry, I couldn't generate an answer.";
 
-    return NextResponse.json({ answer });
+    return NextResponse.json({ answer }, { headers: corsHeaders() });
   } catch (error) {
     console.error('Chat error:', error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Chat failed' },
-      { status: 500 }
+      { status: 500, headers: corsHeaders() }
     );
   }
 }

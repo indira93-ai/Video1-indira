@@ -23,7 +23,25 @@ import {
   Info,
   Clock,
   HardDrive,
+  Globe,
 } from 'lucide-react';
+
+export const MEETING_SPOKEN_LANGUAGES = [
+  { code: 'auto', name: 'Auto-Detect Spoken Language', native: 'Auto' },
+  { code: 'te', name: 'Telugu', native: 'తెలుగు' },
+  { code: 'hi', name: 'Hindi', native: 'हिन्दी' },
+  { code: 'en', name: 'English', native: 'English' },
+  { code: 'ta', name: 'Tamil', native: 'தமிழ்' },
+  { code: 'kn', name: 'Kannada', native: 'ಕನ್ನಡ' },
+  { code: 'ml', name: 'Malayalam', native: 'മലയാളം' },
+  { code: 'mr', name: 'Marathi', native: 'मराठी' },
+  { code: 'bn', name: 'Bengali', native: 'বাংলা' },
+  { code: 'es', name: 'Spanish', native: 'Español' },
+  { code: 'fr', name: 'French', native: 'Français' },
+  { code: 'de', name: 'German', native: 'Deutsch' },
+  { code: 'ja', name: 'Japanese', native: '日本語' },
+  { code: 'ar', name: 'Arabic', native: 'العربية' },
+];
 
 interface MeetingRecorderProps {
   isOpen: boolean;
@@ -74,6 +92,7 @@ export default function MeetingRecorder({
 
   // Save state
   const [meetingTitle, setMeetingTitle] = useState<string>('');
+  const [meetingLanguage, setMeetingLanguage] = useState<string>('auto');
   const [saveProgress, setSaveProgress] = useState<number>(0);
   const [saveStepText, setSaveStepText] = useState<string>('');
   const [savedVideoId, setSavedVideoId] = useState<string | null>(null);
@@ -515,7 +534,7 @@ export default function MeetingRecorder({
       let audioBlobToSend: Blob = recordedAudioBlob || recordedVideoBlob;
       let audioFileName = 'meeting-audio.webm';
 
-      if (!recordedAudioBlob && recordedVideoBlob.size > 24 * 1024 * 1024) {
+      if (!recordedAudioBlob && recordedVideoBlob.size > 20 * 1024 * 1024) {
         try {
           const AudioCtx =
             window.AudioContext ||
@@ -526,23 +545,58 @@ export default function MeetingRecorder({
           audioBlobToSend = encodeAudioBufferToWav(audioBuffer);
           audioFileName = 'meeting-audio.wav';
           await aCtx.close();
+
+          // Upload audio to Supabase Storage
+          await supabase.storage
+            .from('videos')
+            .upload(`${storagePath}.audio.wav`, audioBlobToSend, {
+              cacheControl: '3600',
+              upsert: true,
+            });
         } catch (e) {
-          console.warn('WAV fallback encode skipped, sending recorded blob directly:', e);
+          console.warn('WAV fallback encode skipped:', e);
         }
       }
 
-      const formData = new FormData();
-      formData.append('audio', audioBlobToSend, audioFileName);
-      formData.append('videoId', videoRecord.id);
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const authHeaders: Record<string, string> = {};
+      if (session?.access_token) {
+        authHeaders['Authorization'] = `Bearer ${session.access_token}`;
+      }
 
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        body: formData,
-      });
+      let response: Response;
+      if (audioBlobToSend && audioBlobToSend.size <= 3.5 * 1024 * 1024) {
+        const formData = new FormData();
+        formData.append('audio', audioBlobToSend, audioFileName);
+        formData.append('videoId', videoRecord.id);
+        formData.append('language', meetingLanguage);
+
+        response = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: authHeaders,
+          body: formData,
+        });
+      } else {
+        response = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: {
+            ...authHeaders,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            videoId: videoRecord.id,
+            language: meetingLanguage,
+          }),
+        });
+      }
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}));
-        throw new Error(errJson.error || 'AI Analysis failed to process audio.');
+        throw new Error(
+          errJson.error || `AI Analysis failed with server code ${response.status}`
+        );
       }
 
       setSaveProgress(100);
@@ -738,6 +792,34 @@ export default function MeetingRecorder({
                 </div>
               </div>
 
+              {/* Spoken Language Selector (Pre-recording) */}
+              <div className="max-w-lg mx-auto p-3 rounded-xl bg-surface-900/60 border border-surface-800 text-left">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-primary-400 flex-shrink-0" />
+                    <div>
+                      <h4 className="text-xs font-semibold text-surface-200">
+                        Meeting Spoken Language
+                      </h4>
+                      <p className="text-[11px] text-surface-400">
+                        Select spoken language for 100% accurate CC subtitles (Telugu, Hindi, English, etc.)
+                      </p>
+                    </div>
+                  </div>
+                  <select
+                    value={meetingLanguage}
+                    onChange={(e) => setMeetingLanguage(e.target.value)}
+                    className="bg-surface-800 border border-surface-700 text-xs font-medium text-surface-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary-500 cursor-pointer"
+                  >
+                    {MEETING_SPOKEN_LANGUAGES.map((lang) => (
+                      <option key={lang.code} value={lang.code}>
+                        {lang.name} {lang.native !== 'Auto' ? `(${lang.native})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
               {/* Browser sharing tip */}
               <div className="flex items-start gap-2.5 p-3 rounded-xl bg-surface-900/40 border border-surface-800/80 max-w-lg mx-auto text-left text-xs text-surface-400">
                 <Info className="w-4 h-4 text-primary-400 flex-shrink-0 mt-0.5" />
@@ -892,17 +974,36 @@ export default function MeetingRecorder({
 
               {/* Meeting Title & Metadata */}
               <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-semibold text-surface-300 mb-1">
-                    Meeting Title
-                  </label>
-                  <input
-                    type="text"
-                    value={meetingTitle}
-                    onChange={(e) => setMeetingTitle(e.target.value)}
-                    placeholder="e.g. Q3 Sprint Planning Meeting"
-                    className="input-field text-sm"
-                  />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-surface-300 mb-1">
+                      Meeting Title
+                    </label>
+                    <input
+                      type="text"
+                      value={meetingTitle}
+                      onChange={(e) => setMeetingTitle(e.target.value)}
+                      placeholder="e.g. Q3 Sprint Planning Meeting"
+                      className="input-field text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-surface-300 mb-1">
+                      Spoken Language for Subtitles
+                    </label>
+                    <select
+                      value={meetingLanguage}
+                      onChange={(e) => setMeetingLanguage(e.target.value)}
+                      className="input-field text-sm cursor-pointer"
+                    >
+                      {MEETING_SPOKEN_LANGUAGES.map((lang) => (
+                        <option key={lang.code} value={lang.code}>
+                          {lang.name} {lang.native !== 'Auto' ? `(${lang.native})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between text-xs text-surface-400 px-1">

@@ -127,9 +127,16 @@ function VideoDetailContent() {
 
       if (analysisData) {
         setAnalysis(analysisData);
+        const originalLang =
+          analysisData.speaker_mapping?._detected_language ||
+          analysisData.detected_language ||
+          'English';
+
         setTranslationsCache({
-          English: analysisData.transcript_segments || [],
+          [originalLang]: analysisData.transcript_segments || [],
+          Original: analysisData.transcript_segments || [],
         });
+        setSelectedLanguage(originalLang);
       }
       setIsLoading(false);
     };
@@ -141,8 +148,11 @@ function VideoDetailContent() {
   }, [translationsCache, selectedLanguage, analysis?.transcript_segments]);
 
   const activeSubtitle = useMemo(() => {
+    if (!currentSegments || currentSegments.length === 0) return null;
     return currentSegments.find(
-      (seg) => currentTime >= seg.start && currentTime <= (seg.end || seg.start + 2.5)
+      (seg) =>
+        currentTime >= seg.start - 0.05 &&
+        currentTime <= Math.max(seg.end + 0.25, seg.start + 1.2)
     );
   }, [currentSegments, currentTime]);
 
@@ -197,8 +207,14 @@ function VideoDetailContent() {
   const handleLanguageChange = async (targetLang: string) => {
     if (!analysis || targetLang === selectedLanguage) return;
 
-    if (targetLang === 'English') {
-      setSelectedLanguage('English');
+    const originalLang =
+      analysis.speaker_mapping?._detected_language ||
+      analysis.detected_language ||
+      'English';
+
+    // If switching back to original language
+    if (targetLang === originalLang || targetLang === 'Original') {
+      setSelectedLanguage(targetLang);
       return;
     }
 
@@ -211,12 +227,23 @@ function VideoDetailContent() {
     setTranslationError(null);
 
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
       const res = await fetch('/api/subtitles/translate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           segments: analysis.transcript_segments,
           targetLanguage: targetLang,
+          sourceLanguage: originalLang,
         }),
       });
 
@@ -287,9 +314,19 @@ function VideoDetailContent() {
     setChatLoading(true);
 
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ videoId, question: userMessage }),
       });
 
@@ -557,12 +594,17 @@ function VideoDetailContent() {
 
               {/* Subtitle Overlay (Works for uploaded videos, screen recordings & YouTube) */}
               {showSubtitles && activeSubtitle && (
-                <div className="absolute bottom-12 left-1/2 -translate-x-1/2 w-[90%] max-w-2xl text-center pointer-events-none z-30 transition-all duration-150">
-                  <div className="inline-block bg-black/85 backdrop-blur-md text-white text-sm sm:text-base md:text-lg font-medium px-4 py-2 rounded-xl shadow-2xl border border-white/10 leading-snug">
-                    <span className="text-primary-300 text-xs uppercase tracking-wider block font-semibold mb-0.5">
-                      {getSpeakerName(activeSubtitle.speaker)}
-                    </span>
-                    {activeSubtitle.text}
+                <div className="absolute bottom-12 left-1/2 -translate-x-1/2 w-[92%] max-w-2xl text-center pointer-events-none z-30 transition-all duration-150">
+                  <div className="inline-block bg-black/85 backdrop-blur-md text-white text-sm sm:text-base md:text-lg font-medium px-4 py-2.5 rounded-xl shadow-2xl border border-white/10 leading-snug">
+                    <div className="flex items-center justify-center gap-2 mb-0.5">
+                      <span className="text-primary-300 text-xs uppercase tracking-wider font-semibold">
+                        {getSpeakerName(activeSubtitle.speaker)}
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-white/10 text-surface-300 font-mono">
+                        {selectedLanguage}
+                      </span>
+                    </div>
+                    <p className="tracking-wide">{activeSubtitle.text}</p>
                   </div>
                 </div>
               )}
@@ -599,11 +641,16 @@ function VideoDetailContent() {
                     disabled={isTranslating}
                     className="bg-surface-800 border border-surface-700 rounded-lg px-2.5 py-1.5 text-xs font-medium text-surface-200 focus:outline-none focus:border-primary-500 transition-colors disabled:opacity-50 cursor-pointer"
                   >
-                    {SUBTITLE_LANGUAGES.map((lang) => (
-                      <option key={lang.code} value={lang.name}>
-                        {lang.name} ({lang.native})
-                      </option>
-                    ))}
+                    {SUBTITLE_LANGUAGES.map((lang) => {
+                      const isOriginal =
+                        (analysis?.speaker_mapping?._detected_language || 'English') ===
+                        lang.name;
+                      return (
+                        <option key={lang.code} value={lang.name}>
+                          {lang.name} ({lang.native}) {isOriginal ? '• Original Spoken' : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 

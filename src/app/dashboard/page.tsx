@@ -237,31 +237,70 @@ export default function DashboardPage() {
       setUploadProgress(95);
       setUploadStatus('extracting');
 
-      // If video file is <= 24MB, Whisper accepts MP4, WebM, M4A directly with 100% audio fidelity!
-      let audioBlob: Blob;
+      // If video file is large (> 20MB), extract audio in browser and upload directly to Supabase Storage
+      // to keep it within Groq Whisper's 25MB limit without hitting Vercel's 4.5MB function payload limit.
+      let audioBlob: Blob | null = null;
       let audioFileName = uploadFile.name;
-      if (uploadFile.size <= 24 * 1024 * 1024) {
+
+      if (uploadFile.size > 20 * 1024 * 1024) {
+        try {
+          audioBlob = await extractAudioFromVideo(uploadFile);
+          audioFileName = 'audio.wav';
+          // Upload extracted audio to Supabase Storage directly
+          await supabase.storage
+            .from('videos')
+            .upload(`${storagePath}.audio.wav`, audioBlob, {
+              cacheControl: '3600',
+              upsert: true,
+            });
+        } catch (audioExtractErr) {
+          console.warn('Audio extraction notice:', audioExtractErr);
+        }
+      } else if (uploadFile.size <= 3.5 * 1024 * 1024) {
         audioBlob = uploadFile;
-      } else {
-        audioBlob = await extractAudioFromVideo(uploadFile);
-        audioFileName = 'audio.wav';
       }
 
       setUploadStatus('analyzing');
 
-      // Send audio to API for transcription & analysis
-      const formData = new FormData();
-      formData.append('audio', audioBlob, audioFileName);
-      formData.append('videoId', videoRecord.id);
+      // Retrieve current session token for resilient authorization on hosted server
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const authHeaders: Record<string, string> = {};
+      if (session?.access_token) {
+        authHeaders['Authorization'] = `Bearer ${session.access_token}`;
+      }
 
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        body: formData,
-      });
+      // If audioBlob is smaller than 3.5MB, it can be passed via FormData.
+      // Otherwise, we send videoId as JSON so Vercel's 4.5MB request limit is NEVER exceeded,
+      // and the server directly streams from Supabase Storage.
+      let response: Response;
+      if (audioBlob && audioBlob.size <= 3.5 * 1024 * 1024) {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, audioFileName);
+        formData.append('videoId', videoRecord.id);
+
+        response = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: authHeaders,
+          body: formData,
+        });
+      } else {
+        response = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: {
+            ...authHeaders,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ videoId: videoRecord.id }),
+        });
+      }
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.error || 'Analysis failed');
+        const serverError =
+          err.error || `Server responded with ${response.status}: ${response.statusText}`;
+        throw new Error(serverError);
       }
 
       setUploadProgress(100);
@@ -291,15 +330,25 @@ export default function DashboardPage() {
     setYoutubeStep('Fetching YouTube transcript & video info...');
 
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
       const res = await fetch('/api/youtube', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ url: youtubeUrl.trim() }),
       });
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to analyze YouTube video');
+        throw new Error(data.error || `Failed to analyze YouTube video (${res.status})`);
       }
 
       setYoutubeStep('Analysis complete! Opening workspace...');

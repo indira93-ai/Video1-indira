@@ -49,6 +49,7 @@ export interface VideoAnalysis {
   unresolved_questions: string[];
   transcript_segments: TranscriptSegment[];
   speaker_mapping: Record<string, string>;
+  detected_language?: string;
   created_at: string;
   updated_at: string;
 }

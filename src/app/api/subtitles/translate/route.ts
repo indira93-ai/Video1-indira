@@ -1,40 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { getAuthenticatedUser } from '@/lib/supabase/server';
 import { getGroqClient, getSupportedGroqModel } from '@/lib/groq';
 import { TranscriptSegment } from '@/lib/types';
+import { corsHeaders, handleOptions } from '@/lib/api-utils';
 
 const groq = getGroqClient();
 
 export const maxDuration = 120;
 
+export async function OPTIONS() {
+  return handleOptions();
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const { user, error: authError } = await getAuthenticatedUser(request);
 
     if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401, headers: corsHeaders() }
+      );
     }
 
-    const { segments, targetLanguage } = (await request.json()) as {
+    const { segments, targetLanguage, sourceLanguage } = (await request.json().catch(() => ({}))) as {
       segments: TranscriptSegment[];
       targetLanguage: string;
+      sourceLanguage?: string;
     };
 
     if (!segments || !Array.isArray(segments) || segments.length === 0) {
-      return NextResponse.json({ error: 'Segments array is required' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Segments array is required' },
+        { status: 400, headers: corsHeaders() }
+      );
     }
 
     if (!targetLanguage) {
-      return NextResponse.json({ error: 'targetLanguage is required' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'targetLanguage is required' },
+        { status: 400, headers: corsHeaders() }
+      );
     }
 
-    // If English, return original segments directly
-    if (targetLanguage.toLowerCase() === 'english' || targetLanguage.toLowerCase() === 'en') {
-      return NextResponse.json({ success: true, segments, language: 'English' });
+    // If target language is same as source language or 'Original', return original segments directly
+    const cleanTarget = targetLanguage.trim().toLowerCase();
+    const cleanSource = (sourceLanguage || '').trim().toLowerCase();
+    if (cleanTarget === 'original' || (cleanSource && cleanTarget === cleanSource)) {
+      return NextResponse.json(
+        { success: true, segments, language: targetLanguage },
+        { headers: corsHeaders() }
+      );
     }
 
     const chatModel = await getSupportedGroqModel(groq);
@@ -56,12 +72,13 @@ export async function POST(request: NextRequest) {
 
     await Promise.all(
       batches.map(async (batch) => {
-        const prompt = `You are an expert subtitle translator. Translate each item in the following JSON array into ${targetLanguage}.
-Maintain the exact same "id" and provide the translated subtitle text under "text".
+        const fromInfo = sourceLanguage ? `from ${sourceLanguage} ` : '';
+        const prompt = `You are an expert subtitle translator. Translate each item in the following JSON array ${fromInfo}into ${targetLanguage}.
+Maintain the exact same "id" and provide the natural translated subtitle text under "text".
 Guidelines:
-- Match the conversational tone, meaning, and rhythm of speech.
-- Ensure the translation is natural and culturally accurate.
-- Keep subtitle length concise and readable.
+- Match conversational tone, rhythm, and sentence flow.
+- Ensure natural phrasing and cultural accuracy for subtitle viewers.
+- Keep subtitle length concise so it stays synchronized with video timing.
 - Return ONLY a valid JSON array of objects: [{"id": "...", "text": "..."}, ...]. Do not include markdown codeblocks or other text.
 
 Input:
@@ -75,7 +92,6 @@ ${JSON.stringify(batch)}`;
           });
 
           const rawContent = res.choices[0]?.message?.content || '[]';
-          // Clean possible markdown code fences
           const cleaned = rawContent
             .replace(/^```json\s*/i, '')
             .replace(/^```\s*/i, '')
@@ -102,16 +118,19 @@ ${JSON.stringify(batch)}`;
       text: translationMap[seg.id] || seg.text,
     }));
 
-    return NextResponse.json({
-      success: true,
-      language: targetLanguage,
-      segments: translatedSegments,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        language: targetLanguage,
+        segments: translatedSegments,
+      },
+      { headers: corsHeaders() }
+    );
   } catch (error) {
     console.error('Subtitle translation error:', error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Translation failed' },
-      { status: 500 }
+      { status: 500, headers: corsHeaders() }
     );
   }
 }
