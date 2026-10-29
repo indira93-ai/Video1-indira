@@ -72,14 +72,17 @@ export async function POST(request: NextRequest) {
 
     await Promise.all(
       batches.map(async (batch) => {
-        const fromInfo = sourceLanguage ? `from ${sourceLanguage} ` : '';
-        const prompt = `You are an expert subtitle translator. Translate each item in the following JSON array ${fromInfo}into ${targetLanguage}.
+        const fromInfo = sourceLanguage ? `from ${sourceLanguage} ` : 'from English ';
+        const systemMessage = `You are an expert subtitle translator. Translate English source text accurately into the user's selected dropdown language (${targetLanguage}). Maintain a natural, conversational tone that matches educational video content. Keep technical terms like "Two Minute Classroom" and "SMART method" clear or phonetically accurate in the target script, and ensure the translated lines tightly align with the original timestamps.`;
+
+        const userPrompt = `Translate each item in the following JSON array ${fromInfo}into ${targetLanguage}.
 Maintain the exact same "id" and provide the natural translated subtitle text under "text".
-Guidelines:
-- Match conversational tone, rhythm, and sentence flow.
-- Ensure natural phrasing and cultural accuracy for subtitle viewers.
-- Keep subtitle length concise so it stays synchronized with video timing.
-- Return ONLY a valid JSON array of objects: [{"id": "...", "text": "..."}, ...]. Do not include markdown codeblocks or other text.
+
+Requirements:
+- Maintain a natural, conversational tone that matches educational video content.
+- Keep technical terms like "Two Minute Classroom" and "SMART method", acronyms, and proper nouns clear or phonetically accurate in the target script.
+- Ensure the translated lines tightly align with original timestamps and timing so subtitles synchronize accurately.
+- Return ONLY a valid JSON object in the format: {"translations": [{"id": "...", "text": "..."}, ...]}.
 
 Input:
 ${JSON.stringify(batch)}`;
@@ -87,25 +90,35 @@ ${JSON.stringify(batch)}`;
         try {
           const res = await groq.chat.completions.create({
             model: chatModel,
-            messages: [{ role: 'user', content: prompt }],
+            messages: [
+              { role: 'system', content: systemMessage },
+              { role: 'user', content: userPrompt },
+            ],
             temperature: 0.2,
+            response_format: { type: 'json_object' },
           });
 
-          const rawContent = res.choices[0]?.message?.content || '[]';
+          const rawContent = res.choices[0]?.message?.content || '{}';
           const cleaned = rawContent
             .replace(/^```json\s*/i, '')
             .replace(/^```\s*/i, '')
             .replace(/\s*```$/i, '')
             .trim();
 
-          const parsed = JSON.parse(cleaned) as Array<{ id: string; text: string }>;
-          if (Array.isArray(parsed)) {
-            parsed.forEach((item) => {
-              if (item.id && typeof item.text === 'string') {
-                translationMap[item.id] = item.text.trim();
-              }
-            });
-          }
+          const parsed = JSON.parse(cleaned);
+          const list: Array<{ id: string; text: string }> = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed?.translations)
+            ? parsed.translations
+            : Array.isArray(parsed?.subtitles)
+            ? parsed.subtitles
+            : [];
+
+          list.forEach((item) => {
+            if (item.id && typeof item.text === 'string') {
+              translationMap[item.id] = item.text.trim();
+            }
+          });
         } catch (batchErr) {
           console.error(`Error translating batch to ${targetLanguage}:`, batchErr);
         }
