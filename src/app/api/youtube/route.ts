@@ -214,6 +214,54 @@ export function parseTranscriptData(rawText: string): RawSegment[] {
       segments.push({ text, offset, duration });
     }
   }
+  if (segments.length > 0) return segments;
+
+  // 4. WebVTT subtitle format (from ytdl.getCaptions or YouTube VTT endpoints)
+  if (trimmed.includes('-->')) {
+    const lines = trimmed.split(/\r?\n/).map((l) => l.trim());
+    const vttTimeRegex = /^(\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*-->\s*(\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)/;
+
+    let currentStart = 0;
+    let currentDur = 4000;
+    let currentText = '';
+
+    for (const line of lines) {
+      const m = line.match(vttTimeRegex);
+      if (m) {
+        if (currentText) {
+          segments.push({
+            text: cleanHtmlEntities(currentText).replace(/\s+/g, ' ').trim(),
+            offset: currentStart,
+            duration: currentDur,
+          });
+          currentText = '';
+        }
+        const sParts = m[1].split('.');
+        const eParts = m[2].split('.');
+        const s = parseTimestampToSeconds(sParts[0]) * 1000 + parseInt(sParts[1] || '0', 10);
+        const e = parseTimestampToSeconds(eParts[0]) * 1000 + parseInt(eParts[1] || '0', 10);
+        currentStart = s;
+        currentDur = Math.max(1000, e - s);
+      } else if (
+        line &&
+        !line.startsWith('WEBVTT') &&
+        !line.startsWith('Kind:') &&
+        !line.startsWith('Language:') &&
+        !line.startsWith('NOTE') &&
+        !/^\d+$/.test(line)
+      ) {
+        currentText = currentText ? `${currentText} ${line}` : line;
+      }
+    }
+
+    if (currentText) {
+      segments.push({
+        text: cleanHtmlEntities(currentText).replace(/\s+/g, ' ').trim(),
+        offset: currentStart,
+        duration: currentDur,
+      });
+    }
+  }
 
   return segments;
 }
@@ -391,6 +439,23 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     }
     return null;
   };
+
+  // Tier 0: Direct Ytdl Caption Resolver with multi-client fallback and cookie support
+  try {
+    const ytdl = new Ytdl({
+      cookie: process.env.YOUTUBE_COOKIE,
+      timeoutMs: 15000,
+    });
+    const captionsVtt = await ytdl.getCaptions(videoId);
+    if (captionsVtt && typeof captionsVtt === 'string' && captionsVtt.length > 0) {
+      const parsed = parseTranscriptData(captionsVtt);
+      if (parsed.length > 0) {
+        return { segments: parsed };
+      }
+    }
+  } catch (ytdlCapErr) {
+    console.warn('ytdl.getCaptions notice:', ytdlCapErr instanceof Error ? ytdlCapErr.message : ytdlCapErr);
+  }
 
   // Tier 1: InnerTube ANDROID_VR client (Quest 2 VR endpoint - highly resilient on Vercel/serverless datacenter IPs)
   try {
@@ -622,7 +687,10 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
 
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer | null> {
   try {
-    const ytdl = new Ytdl();
+    const ytdl = new Ytdl({
+      cookie: process.env.YOUTUBE_COOKIE,
+      timeoutMs: 25000,
+    });
     const streamPromise = ytdl.download(`https://www.youtube.com/watch?v=${videoId}`, {
       filter: { hasAudio: true, hasVideo: false },
       quality: 'lowestaudio',
