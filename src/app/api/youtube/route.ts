@@ -57,9 +57,6 @@ function getYouTubeHeaders(extraHeaders: Record<string, string> = {}): Record<st
     'Accept-Language': 'en-US,en;q=0.9',
     ...extraHeaders,
   };
-  if (process.env.YOUTUBE_COOKIE) {
-    headers['Cookie'] = process.env.YOUTUBE_COOKIE;
-  }
   return headers;
 }
 
@@ -440,10 +437,9 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     return null;
   };
 
-  // Tier 0: Direct Ytdl Caption Resolver with multi-client fallback and cookie support
+  // Tier 0: Direct Ytdl Caption Resolver using anonymous access
   try {
     const ytdl = new Ytdl({
-      cookie: process.env.YOUTUBE_COOKIE,
       timeoutMs: 15000,
     });
     const captionsVtt = await ytdl.getCaptions(videoId);
@@ -673,7 +669,7 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
       segments: [],
       isAgeRestricted: true,
       error:
-        'This YouTube video cannot currently be processed. YouTube is restricting automated access (sign-in or age verification required).',
+        'YouTube blocked automatic transcript access for this video. Open the video on YouTube, choose “Show transcript,” and paste the transcript here to continue without server authentication.',
     };
   }
 
@@ -688,7 +684,6 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer | null> {
   try {
     const ytdl = new Ytdl({
-      cookie: process.env.YOUTUBE_COOKIE,
       timeoutMs: 25000,
     });
     const streamPromise = ytdl.download(`https://www.youtube.com/watch?v=${videoId}`, {
