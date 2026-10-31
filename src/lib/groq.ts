@@ -57,7 +57,7 @@ export async function getSupportedGroqModel(groq: Groq): Promise<string> {
   }
 
   // Safe fallback if listing fails
-  cachedModel = 'openai/gpt-oss-120b';
+  cachedModel = 'llama-3.3-70b-versatile';
   return cachedModel;
 }
 

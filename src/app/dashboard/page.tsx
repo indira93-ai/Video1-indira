@@ -12,9 +12,11 @@ import {
   Clock,
   Trash2,
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Loader2,
   FileVideo,
+  FileText,
   Search,
   X,
   CloudUpload,
@@ -96,7 +98,7 @@ export default function DashboardPage() {
 
   // Upload state
   const [showUpload, setShowUpload] = useState(false);
-  const [uploadMode, setUploadMode] = useState<'file' | 'youtube'>('file');
+  const [uploadMode, setUploadMode] = useState<'file' | 'youtube' | 'transcript'>('file');
   const [isDragging, setIsDragging] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -107,7 +109,16 @@ export default function DashboardPage() {
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [youtubeLoading, setYoutubeLoading] = useState(false);
   const [youtubeError, setYoutubeError] = useState('');
+  const [youtubeIsAgeRestricted, setYoutubeIsAgeRestricted] = useState(false);
   const [youtubeStep, setYoutubeStep] = useState('');
+
+  // Transcript state
+  const [manualTitle, setManualTitle] = useState('');
+  const [manualUrl, setManualUrl] = useState('');
+  const [manualTranscript, setManualTranscript] = useState('');
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [transcriptError, setTranscriptError] = useState('');
+  const [transcriptStep, setTranscriptStep] = useState('');
 
   const fetchVideos = useCallback(async () => {
     const { data, error } = await supabase
@@ -318,6 +329,7 @@ export default function DashboardPage() {
 
     setYoutubeLoading(true);
     setYoutubeError('');
+    setYoutubeIsAgeRestricted(false);
     setYoutubeStep('Fetching YouTube transcript & video info...');
 
     try {
@@ -339,6 +351,9 @@ export default function DashboardPage() {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if (data?.isAgeRestricted) {
+          setYoutubeIsAgeRestricted(true);
+        }
         throw new Error(data.error || `Failed to analyze YouTube video (${res.status})`);
       }
 
@@ -357,6 +372,60 @@ export default function DashboardPage() {
       setYoutubeError(err instanceof Error ? err.message : 'Failed to analyze YouTube video');
       setYoutubeLoading(false);
       setYoutubeStep('');
+    }
+  };
+
+  const handleTranscriptSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualTranscript.trim() || transcriptLoading) return;
+
+    setTranscriptLoading(true);
+    setTranscriptError('');
+    setTranscriptStep('Structuring transcript & generating Groq AI insights...');
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
+      const res = await fetch('/api/youtube', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          url: manualUrl.trim() || undefined,
+          transcript: manualTranscript.trim(),
+          title: manualTitle.trim() || undefined,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Failed to analyze transcript (${res.status})`);
+      }
+
+      setTranscriptStep('Analysis complete! Opening workspace...');
+      await fetchVideos();
+
+      setTimeout(() => {
+        setShowUpload(false);
+        setManualTranscript('');
+        setManualTitle('');
+        setManualUrl('');
+        setTranscriptLoading(false);
+        setTranscriptStep('');
+        router.push(`/video/${data.videoId}`);
+      }, 700);
+    } catch (err) {
+      console.error('Transcript submit error:', err);
+      setTranscriptError(err instanceof Error ? err.message : 'Failed to analyze transcript');
+      setTranscriptLoading(false);
+      setTranscriptStep('');
     }
   };
 
@@ -614,7 +683,7 @@ export default function DashboardPage() {
             </div>
 
             {/* Mode Switch Tabs */}
-            {uploadStatus === 'idle' && !youtubeLoading && (
+            {uploadStatus === 'idle' && !youtubeLoading && !transcriptLoading && (
               <div className="flex bg-surface-800/80 p-1 rounded-xl mb-6 border border-surface-700/50">
                 <button
                   type="button"
@@ -622,8 +691,9 @@ export default function DashboardPage() {
                     setUploadMode('file');
                     setUploadError('');
                     setYoutubeError('');
+                    setTranscriptError('');
                   }}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${uploadMode === 'file'
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2 rounded-lg text-xs md:text-sm font-medium transition-all ${uploadMode === 'file'
                     ? 'bg-primary-600 text-white shadow-md'
                     : 'text-surface-400 hover:text-surface-200'
                     }`}
@@ -637,8 +707,9 @@ export default function DashboardPage() {
                     setUploadMode('youtube');
                     setUploadError('');
                     setYoutubeError('');
+                    setTranscriptError('');
                   }}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all ${uploadMode === 'youtube'
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2 rounded-lg text-xs md:text-sm font-medium transition-all ${uploadMode === 'youtube'
                     ? 'bg-red-600 text-white shadow-md'
                     : 'text-surface-400 hover:text-surface-200'
                     }`}
@@ -646,11 +717,26 @@ export default function DashboardPage() {
                   <YouTubeIcon className="w-4 h-4" />
                   YouTube URL
                 </button>
-
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUploadMode('transcript');
+                    setUploadError('');
+                    setYoutubeError('');
+                    setTranscriptError('');
+                  }}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2 rounded-lg text-xs md:text-sm font-medium transition-all ${uploadMode === 'transcript'
+                    ? 'bg-emerald-600 text-white shadow-md'
+                    : 'text-surface-400 hover:text-surface-200'
+                    }`}
+                >
+                  <FileText className="w-4 h-4" />
+                  Provide Transcript
+                </button>
               </div>
             )}
 
-            {uploadStatus === 'idle' && !youtubeLoading && uploadMode === 'file' && (
+            {uploadStatus === 'idle' && !youtubeLoading && !transcriptLoading && uploadMode === 'file' && (
               <>
                 {/* Drop Zone */}
                 <div
@@ -723,7 +809,7 @@ export default function DashboardPage() {
               </>
             )}
 
-            {uploadStatus === 'idle' && !youtubeLoading && uploadMode === 'youtube' && (
+            {uploadStatus === 'idle' && !youtubeLoading && !transcriptLoading && uploadMode === 'youtube' && (
               <form onSubmit={handleYouTubeSubmit} className="space-y-4">
                 <div className="rounded-2xl border border-surface-700/50 p-6 bg-surface-900/40">
                   <div className="w-12 h-12 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center mx-auto mb-4">
@@ -745,17 +831,64 @@ export default function DashboardPage() {
                       required
                       placeholder="https://www.youtube.com/watch?v=..."
                       value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
+                      onChange={(e) => {
+                        setYoutubeUrl(e.target.value);
+                        if (youtubeError) setYoutubeError('');
+                      }}
                       className="w-full pl-10 pr-4 py-3 bg-surface-800/80 border border-surface-700 rounded-xl text-surface-100 placeholder-surface-500 text-sm focus:outline-none focus:border-red-500 transition-colors"
                     />
                   </div>
                 </div>
 
                 {youtubeError && (
-                  <div className="flex items-center gap-2 text-red-400 text-sm p-3 rounded-xl bg-red-500/10 border border-red-500/20">
-                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                    <span>{youtubeError}</span>
-                  </div>
+                  youtubeIsAgeRestricted ||
+                  youtubeError.toLowerCase().includes('age-restricted') ||
+                  youtubeError.toLowerCase().includes('provide its transcript') ||
+                  youtubeError.toLowerCase().includes('upload the video') ? (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-amber-200">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+                        <div className="space-y-2 text-sm flex-1">
+                          <p className="font-semibold text-amber-300">
+                            Age-Restricted Video Detected
+                          </p>
+                          <p className="text-amber-200/90 text-xs leading-relaxed">
+                            {youtubeError}
+                          </p>
+                          <div className="flex flex-wrap items-center gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setUploadMode('file');
+                                setYoutubeError('');
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary-600 hover:bg-primary-500 text-white text-xs font-medium transition-colors shadow-sm"
+                            >
+                              <Upload className="w-3.5 h-3.5" />
+                              Upload Video File
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setManualUrl(youtubeUrl);
+                                setUploadMode('transcript');
+                                setYoutubeError('');
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors shadow-sm"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                              Provide Transcript
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-red-400 text-sm p-3 rounded-xl bg-red-500/10 border border-red-500/20">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      <span>{youtubeError}</span>
+                    </div>
+                  )
                 )}
 
                 <button
@@ -765,6 +898,112 @@ export default function DashboardPage() {
                 >
                   <YouTubeIcon className="w-4 h-4" />
                   Analyze YouTube Video
+                </button>
+              </form>
+            )}
+
+            {uploadStatus === 'idle' && !youtubeLoading && !transcriptLoading && uploadMode === 'transcript' && (
+              <form onSubmit={handleTranscriptSubmit} className="space-y-4">
+                <div className="rounded-2xl border border-surface-700/50 p-6 bg-surface-900/40 space-y-4">
+                  <div className="w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto mb-2">
+                    <FileText className="w-6 h-6" />
+                  </div>
+                  <div className="text-center">
+                    <h3 className="font-semibold text-surface-200 mb-1">
+                      Provide Video Transcript
+                    </h3>
+                    <p className="text-surface-500 text-xs max-w-sm mx-auto">
+                      For age-restricted YouTube videos, private meetings, or lectures. Paste transcript text or upload subtitle files.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-surface-400 mb-1.5">
+                      Video Title (optional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Keynote Presentation or Discussion"
+                      value={manualTitle}
+                      onChange={(e) => setManualTitle(e.target.value)}
+                      className="w-full px-3.5 py-2.5 bg-surface-800/80 border border-surface-700 rounded-xl text-surface-100 placeholder-surface-500 text-sm focus:outline-none focus:border-emerald-500 transition-colors"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-surface-400 mb-1.5">
+                      YouTube URL (optional, embeds video player in summary workspace)
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-surface-500">
+                        <Link2 className="w-4 h-4" />
+                      </div>
+                      <input
+                        type="url"
+                        placeholder="https://www.youtube.com/watch?v=..."
+                        value={manualUrl}
+                        onChange={(e) => setManualUrl(e.target.value)}
+                        className="w-full pl-9 pr-3.5 py-2.5 bg-surface-800/80 border border-surface-700 rounded-xl text-surface-100 placeholder-surface-500 text-sm focus:outline-none focus:border-emerald-500 transition-colors"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-medium text-surface-400">
+                        Transcript Text *
+                      </label>
+                      <label className="text-xs text-emerald-400 hover:text-emerald-300 cursor-pointer flex items-center gap-1">
+                        <Upload className="w-3 h-3" />
+                        Upload .txt / .srt / .vtt
+                        <input
+                          type="file"
+                          accept=".txt,.srt,.vtt"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) {
+                              const reader = new FileReader();
+                              reader.onload = (ev) => {
+                                const text = ev.target?.result as string;
+                                if (text) setManualTranscript(text);
+                                if (!manualTitle) setManualTitle(f.name.replace(/\.[^/.]+$/, ''));
+                              };
+                              reader.readAsText(f);
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <textarea
+                      required
+                      rows={6}
+                      placeholder="Paste YouTube transcript, subtitle text, or talk notes here...&#10;&#10;Tip: On YouTube, click '...More' > 'Show transcript', copy the text and paste here."
+                      value={manualTranscript}
+                      onChange={(e) => setManualTranscript(e.target.value)}
+                      className="w-full p-3.5 bg-surface-800/80 border border-surface-700 rounded-xl text-surface-100 placeholder-surface-500 text-sm focus:outline-none focus:border-emerald-500 transition-colors resize-y font-mono text-xs"
+                    />
+                    <div className="flex items-center justify-between text-[11px] text-surface-500 mt-1">
+                      <span>Supports YouTube copy/paste, timestamps, SRT, or plain text</span>
+                      <span>{manualTranscript.trim().split(/\s+/).filter(Boolean).length} words</span>
+                    </div>
+                  </div>
+                </div>
+
+                {transcriptError && (
+                  <div className="flex items-center gap-2 text-red-400 text-sm p-3 rounded-xl bg-red-500/10 border border-red-500/20">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span>{transcriptError}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={!manualTranscript.trim() || transcriptLoading}
+                  className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-600/20"
+                >
+                  <FileText className="w-4 h-4" />
+                  Analyze Transcript with Groq AI
                 </button>
               </form>
             )}
@@ -780,6 +1019,21 @@ export default function DashboardPage() {
                 </h3>
                 <p className="text-surface-400 text-sm max-w-sm mx-auto">
                   {youtubeStep || 'Extracting transcript and generating intelligent insights...'}
+                </p>
+              </div>
+            )}
+
+            {transcriptLoading && (
+              <div className="text-center py-8">
+                <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto mb-6 animate-pulse">
+                  <FileText className="w-8 h-8" />
+                </div>
+                <Loader2 className="w-8 h-8 animate-spin text-emerald-400 mx-auto mb-4" />
+                <h3 className="font-semibold text-surface-200 text-lg mb-2">
+                  Generating AI Summary
+                </h3>
+                <p className="text-surface-400 text-sm max-w-sm mx-auto">
+                  {transcriptStep || 'Analyzing transcript, extracting synopsis, and structuring key moments...'}
                 </p>
               </div>
             )}
