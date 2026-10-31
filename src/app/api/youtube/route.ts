@@ -144,6 +144,54 @@ export interface TranscriptResult {
   noCaptions?: boolean;
 }
 
+async function fetchExternalTranscript(videoId: string): Promise<RawSegment[] | null> {
+  const apiKey = process.env.SUPADATA_API_KEY;
+  if (!apiKey) return null;
+
+  const transcriptUrl = new URL('https://api.supadata.ai/v1/transcript');
+  transcriptUrl.searchParams.set('url', `https://www.youtube.com/watch?v=${videoId}`);
+  transcriptUrl.searchParams.set('mode', 'auto');
+
+  try {
+    const request = (url: string) =>
+      fetch(url, {
+        headers: { 'x-api-key': apiKey },
+        signal: AbortSignal.timeout(20000),
+      });
+
+    let response = await request(transcriptUrl.toString());
+    let result = (await response.json().catch(() => ({}))) as any;
+
+    if (response.status === 202 && typeof result.jobId === 'string') {
+      const resultUrl = `https://api.supadata.ai/v1/transcript/${encodeURIComponent(result.jobId)}`;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        response = await request(resultUrl);
+        result = (await response.json().catch(() => ({}))) as any;
+        if (result.status === 'completed' || result.status === 'failed') break;
+      }
+    }
+
+    if (!response.ok || result.status === 'failed' || !Array.isArray(result.content)) {
+      console.warn('External transcript provider did not return captions:', response.status);
+      return null;
+    }
+
+    const segments = result.content
+      .filter((item: any) => typeof item?.text === 'string' && item.text.trim())
+      .map((item: any) => ({
+        text: cleanHtmlEntities(item.text),
+        offset: Math.max(0, Math.round(Number(item.offset) || 0)),
+        duration: Math.max(1000, Math.round(Number(item.duration) || 0)),
+      }));
+
+    return segments.length > 0 ? segments : null;
+  } catch (error) {
+    console.warn('External transcript provider request failed:', error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
 /**
  * Universal parser for YouTube timedtext responses:
  * Handles JSON format3, XML format3 (<p t="..." d="...">), and classic XML (<text start="..." dur="...">).
@@ -393,6 +441,11 @@ async function fetchYouTubeMetadata(videoId: string): Promise<{ title: string; a
 async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> {
   let isAgeRestricted = false;
   let playabilityReason: string | null = null;
+
+  // Use a hosted transcript provider first in deployments that configure one.
+  // Its outbound IP is independent of the Vercel function's IP.
+  const externalSegments = await fetchExternalTranscript(videoId);
+  if (externalSegments?.length) return { segments: externalSegments };
 
   // Helper to extract captions from tracks array with retry and matching headers
   const extractCaptionsFromTracks = async (
@@ -669,7 +722,9 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
       segments: [],
       isAgeRestricted: true,
       error:
-        'YouTube blocked automatic transcript access for this video. Open the video on YouTube, choose “Show transcript,” and paste the transcript here to continue without server authentication.',
+        process.env.SUPADATA_API_KEY
+          ? 'YouTube and the configured transcript provider could not retrieve captions for this video. Check that it is publicly accessible and has captions, or upload the video file instead.'
+          : 'YouTube blocked transcript access from this Vercel deployment. Add SUPADATA_API_KEY to Vercel to enable hosted transcript retrieval, or upload the video file instead.',
     };
   }
 
