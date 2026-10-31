@@ -15,33 +15,46 @@ import { corsHeaders, handleOptions } from '@/lib/api-utils';
 
 const groq = getGroqClient();
 
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 export async function OPTIONS() {
   return handleOptions();
 }
 
-// Resilient connection agent disabling IPv6 preference to prevent connect timeouts on dual-stack/tethered networks
-const resilientAgent = new Agent({
-  connect: {
-    autoSelectFamily: false,
-    timeout: 15000,
-  },
-});
+const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-function resilientFetch(url: string | URL | Request, init: any = {}): Promise<Response> {
+const VR_USER_AGENT =
+  'Mozilla/5.0 (Linux; Android 10; Quest 2) AppleWebKit/537.36 (KHTML, like Gecko) OculusBrowser/15.0.0.0.22.280389506 SamsungBrowser/4.0 Chrome/90.0.4430.210 Mobile VR Safari/537.36';
+
+async function resilientFetch(url: string | URL | Request, init: any = {}): Promise<Response> {
   try {
-    return undiciFetch(url as any, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(url as any, {
       ...init,
-      dispatcher: resilientAgent,
-    }) as unknown as Promise<Response>;
-  } catch {
-    return fetch(url as any, init);
+      signal: init?.signal || controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (fetchErr) {
+    // Fallback: try undiciFetch with direct timeout
+    try {
+      return (await undiciFetch(url as any, {
+        ...init,
+        connectTimeout: 15000,
+      })) as unknown as Response;
+    } catch {
+      throw fetchErr;
+    }
   }
 }
 
 function getYouTubeHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = {
+    'User-Agent': DEFAULT_USER_AGENT,
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
     ...extraHeaders,
   };
   if (process.env.YOUTUBE_COOKIE) {
@@ -336,8 +349,11 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
   let isAgeRestricted = false;
   let playabilityReason: string | null = null;
 
-  // Helper to extract captions from tracks array with retry
-  const extractCaptionsFromTracks = async (captionTracks: any[]): Promise<RawSegment[] | null> => {
+  // Helper to extract captions from tracks array with retry and matching headers
+  const extractCaptionsFromTracks = async (
+    captionTracks: any[],
+    userAgent?: string
+  ): Promise<RawSegment[] | null> => {
     if (!Array.isArray(captionTracks) || captionTracks.length === 0) return null;
 
     const sortedTracks = [...captionTracks].sort((a: any, b: any) => {
@@ -346,13 +362,13 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
       return aIsEn === bIsEn ? 0 : aIsEn ? -1 : 1;
     });
 
+    const headers = getYouTubeHeaders(userAgent ? { 'User-Agent': userAgent } : {});
+
     for (const track of sortedTracks) {
       if (!track?.baseUrl) continue;
       try {
         const text = await retryWithBackoff(async () => {
-          const trackRes = await resilientFetch(track.baseUrl, {
-            headers: getYouTubeHeaders(),
-          });
+          const trackRes = await resilientFetch(track.baseUrl, { headers });
           if (!trackRes.ok) throw new Error(`Caption track HTTP ${trackRes.status}`);
           return await trackRes.text();
         }, 1, 300);
@@ -362,9 +378,7 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
 
         // Try with fmt=srv3 if empty
         const srv3Text = await retryWithBackoff(async () => {
-          const srv3Res = await resilientFetch(`${track.baseUrl}&fmt=srv3`, {
-            headers: getYouTubeHeaders(),
-          });
+          const srv3Res = await resilientFetch(`${track.baseUrl}&fmt=srv3`, { headers });
           if (!srv3Res.ok) throw new Error(`Caption srv3 HTTP ${srv3Res.status}`);
           return await srv3Res.text();
         }, 1, 300);
@@ -378,58 +392,14 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     return null;
   };
 
-  // Tier 1: Fast YouTube captions via YoutubeTranscript (English)
-  try {
-    const res = await retryWithBackoff(async () => {
-      return await YoutubeTranscript.fetchTranscript(videoId, {
-        fetch: resilientFetch as any,
-        lang: 'en',
-      });
-    }, 1, 300);
-
-    if (res && res.length > 0) {
-      return {
-        segments: res.map((s) => ({
-          text: cleanHtmlEntities(s.text),
-          duration: Math.round(s.duration),
-          offset: Math.round(s.offset),
-        })),
-      };
-    }
-  } catch {
-    // Continue to Tier 2
-  }
-
-  // Tier 2: YouTube captions via YoutubeTranscript (any available language track)
-  try {
-    const res = await retryWithBackoff(async () => {
-      return await YoutubeTranscript.fetchTranscript(videoId, {
-        fetch: resilientFetch as any,
-      });
-    }, 1, 300);
-
-    if (res && res.length > 0) {
-      return {
-        segments: res.map((s) => ({
-          text: cleanHtmlEntities(s.text),
-          duration: Math.round(s.duration),
-          offset: Math.round(s.offset),
-        })),
-      };
-    }
-  } catch {
-    // Continue to Tier 3
-  }
-
-  // Tier 3: InnerTube ANDROID_VR client (Quest 2 VR endpoint - highly resilient on Vercel/serverless)
+  // Tier 1: InnerTube ANDROID_VR client (Quest 2 VR endpoint - highly resilient on Vercel/serverless datacenter IPs)
   try {
     const vrData = await retryWithBackoff(async () => {
       const res = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
         method: 'POST',
         headers: getYouTubeHeaders({
           'Content-Type': 'application/json',
-          'User-Agent':
-            'Mozilla/5.0 (Linux; Android 10; Quest 2) AppleWebKit/537.36 (KHTML, like Gecko) OculusBrowser/15.0.0.0.22.280389506 SamsungBrowser/4.0 Chrome/90.0.4430.210 Mobile VR Safari/537.36',
+          'User-Agent': VR_USER_AGENT,
         }),
         body: JSON.stringify({
           context: {
@@ -460,7 +430,7 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     }
 
     const vrCaptionTracks = vrData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    const vrSegments = await extractCaptionsFromTracks(vrCaptionTracks);
+    const vrSegments = await extractCaptionsFromTracks(vrCaptionTracks, VR_USER_AGENT);
     if (vrSegments && vrSegments.length > 0) {
       return { segments: vrSegments };
     }
@@ -468,14 +438,79 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     console.warn('ANDROID_VR caption fallback error:', err);
   }
 
-  // Tier 4: InnerTube ANDROID client (YouTube Android mobile app)
+  // Tier 2: InnerTube IOS client (iOS 18 endpoint)
+  const IOS_USER_AGENT = 'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU OS 18_1 like Mac OS X; en_US)';
+  try {
+    const iosData = await retryWithBackoff(async () => {
+      const res = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: getYouTubeHeaders({
+          'Content-Type': 'application/json',
+          'User-Agent': IOS_USER_AGENT,
+        }),
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: 'IOS',
+              clientVersion: '19.45.4',
+              hl: 'en',
+              gl: 'US',
+            },
+          },
+          videoId,
+        }),
+      });
+      if (!res.ok) throw new Error(`IOS HTTP ${res.status}`);
+      return (await res.json()) as any;
+    }, 1, 400);
+
+    const playability = iosData?.playabilityStatus;
+    if (playability && playability.status === 'LOGIN_REQUIRED') {
+      playabilityReason = playability.reason || playabilityReason || 'Sign-in required';
+      if (/age|bot|sign in|inappropriate|verify/i.test(playabilityReason || '')) {
+        isAgeRestricted = true;
+      }
+    }
+
+    const iosTracks = iosData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    const iosSegments = await extractCaptionsFromTracks(iosTracks, IOS_USER_AGENT);
+    if (iosSegments && iosSegments.length > 0) {
+      return { segments: iosSegments };
+    }
+  } catch (err) {
+    console.warn('IOS caption fallback error:', err);
+  }
+
+  // Tier 3: YoutubeTranscript library fallback
+  try {
+    const res = await retryWithBackoff(async () => {
+      return await YoutubeTranscript.fetchTranscript(videoId, {
+        fetch: resilientFetch as any,
+      });
+    }, 1, 300);
+
+    if (res && res.length > 0) {
+      return {
+        segments: res.map((s) => ({
+          text: cleanHtmlEntities(s.text),
+          duration: Math.round(s.duration),
+          offset: Math.round(s.offset),
+        })),
+      };
+    }
+  } catch {
+    // Continue to Tier 4
+  }
+
+  // Tier 4: InnerTube ANDROID client
+  const ANDROID_USER_AGENT = 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)';
   try {
     const androidData = await retryWithBackoff(async () => {
       const res = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
         method: 'POST',
         headers: getYouTubeHeaders({
           'Content-Type': 'application/json',
-          'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
+          'User-Agent': ANDROID_USER_AGENT,
         }),
         body: JSON.stringify({
           context: {
@@ -506,7 +541,7 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     }
 
     const androidTracks = androidData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    const androidSegments = await extractCaptionsFromTracks(androidTracks);
+    const androidSegments = await extractCaptionsFromTracks(androidTracks, ANDROID_USER_AGENT);
     if (androidSegments && androidSegments.length > 0) {
       return { segments: androidSegments };
     }
@@ -514,46 +549,11 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     console.warn('ANDROID caption fallback error:', err);
   }
 
-  // Tier 5: InnerTube IOS client
-  try {
-    const iosData = await retryWithBackoff(async () => {
-      const res = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-        method: 'POST',
-        headers: getYouTubeHeaders({
-          'Content-Type': 'application/json',
-          'User-Agent': 'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU OS 18_1 like Mac OS X; en_US)',
-        }),
-        body: JSON.stringify({
-          context: {
-            client: {
-              clientName: 'IOS',
-              clientVersion: '19.45.4',
-              hl: 'en',
-              gl: 'US',
-            },
-          },
-          videoId,
-        }),
-      });
-      if (!res.ok) throw new Error(`IOS HTTP ${res.status}`);
-      return (await res.json()) as any;
-    }, 1, 400);
-
-    const iosTracks = iosData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    const iosSegments = await extractCaptionsFromTracks(iosTracks);
-    if (iosSegments && iosSegments.length > 0) {
-      return { segments: iosSegments };
-    }
-  } catch (err) {
-    console.warn('IOS caption fallback error:', err);
-  }
-
-  // Tier 6: Web Scraping fallback for ytInitialPlayerResponse
+  // Tier 5: Web Scraping fallback for ytInitialPlayerResponse
   try {
     const pageRes = await resilientFetch(`https://www.youtube.com/watch?v=${videoId}`, {
       headers: getYouTubeHeaders({
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': DEFAULT_USER_AGENT,
         'Accept-Language': 'en-US,en;q=0.9',
       }),
     });
@@ -588,7 +588,7 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
           }
         } catch {}
 
-        const webSegments = await extractCaptionsFromTracks(captionTracks);
+        const webSegments = await extractCaptionsFromTracks(captionTracks, DEFAULT_USER_AGENT);
         if (webSegments && webSegments.length > 0) {
           return { segments: webSegments };
         }
