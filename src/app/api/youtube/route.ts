@@ -40,6 +40,35 @@ function resilientFetch(url: string | URL | Request, init: any = {}): Promise<Re
   }
 }
 
+function getYouTubeHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...extraHeaders,
+  };
+  if (process.env.YOUTUBE_COOKIE) {
+    headers['Cookie'] = process.env.YOUTUBE_COOKIE;
+  }
+  return headers;
+}
+
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  retries = 2,
+  delayMs = 400
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < retries) {
+        await new Promise((res) => setTimeout(res, delayMs * Math.pow(2, attempt)));
+      }
+    }
+  }
+  throw lastError;
+}
+
 function cleanHtmlEntities(text: string): string {
   if (!text) return '';
   return text
@@ -307,12 +336,57 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
   let isAgeRestricted = false;
   let playabilityReason: string | null = null;
 
-  // Tier 1: Fast YouTube captions via resilient fetch (English)
-  try {
-    const res = await YoutubeTranscript.fetchTranscript(videoId, {
-      fetch: resilientFetch as any,
-      lang: 'en',
+  // Helper to extract captions from tracks array with retry
+  const extractCaptionsFromTracks = async (captionTracks: any[]): Promise<RawSegment[] | null> => {
+    if (!Array.isArray(captionTracks) || captionTracks.length === 0) return null;
+
+    const sortedTracks = [...captionTracks].sort((a: any, b: any) => {
+      const aIsEn = a.languageCode === 'en' || a.languageCode?.startsWith('en');
+      const bIsEn = b.languageCode === 'en' || b.languageCode?.startsWith('en');
+      return aIsEn === bIsEn ? 0 : aIsEn ? -1 : 1;
     });
+
+    for (const track of sortedTracks) {
+      if (!track?.baseUrl) continue;
+      try {
+        const text = await retryWithBackoff(async () => {
+          const trackRes = await resilientFetch(track.baseUrl, {
+            headers: getYouTubeHeaders(),
+          });
+          if (!trackRes.ok) throw new Error(`Caption track HTTP ${trackRes.status}`);
+          return await trackRes.text();
+        }, 1, 300);
+
+        const parsed = parseTranscriptData(text);
+        if (parsed.length > 0) return parsed;
+
+        // Try with fmt=srv3 if empty
+        const srv3Text = await retryWithBackoff(async () => {
+          const srv3Res = await resilientFetch(`${track.baseUrl}&fmt=srv3`, {
+            headers: getYouTubeHeaders(),
+          });
+          if (!srv3Res.ok) throw new Error(`Caption srv3 HTTP ${srv3Res.status}`);
+          return await srv3Res.text();
+        }, 1, 300);
+
+        const parsedSrv3 = parseTranscriptData(srv3Text);
+        if (parsedSrv3.length > 0) return parsedSrv3;
+      } catch {
+        // Continue to next track
+      }
+    }
+    return null;
+  };
+
+  // Tier 1: Fast YouTube captions via YoutubeTranscript (English)
+  try {
+    const res = await retryWithBackoff(async () => {
+      return await YoutubeTranscript.fetchTranscript(videoId, {
+        fetch: resilientFetch as any,
+        lang: 'en',
+      });
+    }, 1, 300);
+
     if (res && res.length > 0) {
       return {
         segments: res.map((s) => ({
@@ -326,11 +400,14 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     // Continue to Tier 2
   }
 
-  // Tier 2: YouTube captions via resilient fetch (any available language track)
+  // Tier 2: YouTube captions via YoutubeTranscript (any available language track)
   try {
-    const res = await YoutubeTranscript.fetchTranscript(videoId, {
-      fetch: resilientFetch as any,
-    });
+    const res = await retryWithBackoff(async () => {
+      return await YoutubeTranscript.fetchTranscript(videoId, {
+        fetch: resilientFetch as any,
+      });
+    }, 1, 300);
+
     if (res && res.length > 0) {
       return {
         segments: res.map((s) => ({
@@ -344,132 +421,176 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     // Continue to Tier 3
   }
 
-  // Tier 3: Direct YouTube InnerTube Android Player API
+  // Tier 3: InnerTube ANDROID_VR client (Quest 2 VR endpoint - highly resilient on Vercel/serverless)
   try {
-    const playerRes = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
-      },
-      body: JSON.stringify({
-        context: {
-          client: {
-            clientName: 'ANDROID',
-            clientVersion: '20.10.38',
-            hl: 'en',
-            gl: 'US',
+    const vrData = await retryWithBackoff(async () => {
+      const res = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: getYouTubeHeaders({
+          'Content-Type': 'application/json',
+          'User-Agent':
+            'Mozilla/5.0 (Linux; Android 10; Quest 2) AppleWebKit/537.36 (KHTML, like Gecko) OculusBrowser/15.0.0.0.22.280389506 SamsungBrowser/4.0 Chrome/90.0.4430.210 Mobile VR Safari/537.36',
+        }),
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: 'ANDROID_VR',
+              clientVersion: '1.56.21',
+              hl: 'en',
+              gl: 'US',
+            },
           },
-        },
-        videoId,
-      }),
-    });
+          videoId,
+        }),
+      });
+      if (!res.ok) throw new Error(`ANDROID_VR HTTP ${res.status}`);
+      return (await res.json()) as any;
+    }, 1, 400);
 
-    if (playerRes.ok) {
-      const playerData = (await playerRes.json()) as any;
-      const playability = playerData?.playabilityStatus;
-
-      if (playability) {
-        if (playability.status === 'LOGIN_REQUIRED') {
-          playabilityReason = playability.reason || 'Sign-in required';
-          if (/age|bot|sign in|inappropriate|verify/i.test(playabilityReason || '')) {
-            isAgeRestricted = true;
-          }
-        } else if (playability.status === 'ERROR' || playability.status === 'UNPLAYABLE') {
-          playabilityReason = playability.reason || 'This video is unavailable or removed';
+    const playability = vrData?.playabilityStatus;
+    if (playability) {
+      if (playability.status === 'LOGIN_REQUIRED') {
+        playabilityReason = playability.reason || 'Sign-in required';
+        if (/age|bot|sign in|inappropriate|verify/i.test(playabilityReason || '')) {
+          isAgeRestricted = true;
         }
-      }
-
-      const captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (Array.isArray(captionTracks) && captionTracks.length > 0) {
-        // Sort tracks so English is checked first, then all remaining tracks
-        const sortedTracks = [...captionTracks].sort((a: any, b: any) => {
-          const aIsEn = a.languageCode === 'en' || a.languageCode?.startsWith('en');
-          const bIsEn = b.languageCode === 'en' || b.languageCode?.startsWith('en');
-          return aIsEn === bIsEn ? 0 : aIsEn ? -1 : 1;
-        });
-
-        for (const track of sortedTracks) {
-          if (!track?.baseUrl) continue;
-          try {
-            const trackRes = await resilientFetch(track.baseUrl);
-            if (trackRes.ok) {
-              const text = await trackRes.text();
-              const parsed = parseTranscriptData(text);
-              if (parsed.length > 0) {
-                return { segments: parsed };
-              }
-            }
-
-            // Retry track with fmt=srv3 if empty
-            const srv3Res = await resilientFetch(`${track.baseUrl}&fmt=srv3`);
-            if (srv3Res.ok) {
-              const text = await srv3Res.text();
-              const parsed = parseTranscriptData(text);
-              if (parsed.length > 0) {
-                return { segments: parsed };
-              }
-            }
-          } catch {
-            // Try next track
-          }
-        }
+      } else if (playability.status === 'ERROR' || playability.status === 'UNPLAYABLE') {
+        playabilityReason = playability.reason || 'This video is unavailable';
       }
     }
+
+    const vrCaptionTracks = vrData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    const vrSegments = await extractCaptionsFromTracks(vrCaptionTracks);
+    if (vrSegments && vrSegments.length > 0) {
+      return { segments: vrSegments };
+    }
   } catch (err) {
-    console.warn('InnerTube caption fallback error:', err);
+    console.warn('ANDROID_VR caption fallback error:', err);
   }
 
-  // Tier 4: Web Scraping fallback for ytInitialPlayerResponse
+  // Tier 4: InnerTube ANDROID client (YouTube Android mobile app)
+  try {
+    const androidData = await retryWithBackoff(async () => {
+      const res = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: getYouTubeHeaders({
+          'Content-Type': 'application/json',
+          'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
+        }),
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: 'ANDROID',
+              clientVersion: '20.10.38',
+              hl: 'en',
+              gl: 'US',
+            },
+          },
+          videoId,
+        }),
+      });
+      if (!res.ok) throw new Error(`ANDROID HTTP ${res.status}`);
+      return (await res.json()) as any;
+    }, 1, 400);
+
+    const playability = androidData?.playabilityStatus;
+    if (playability) {
+      if (playability.status === 'LOGIN_REQUIRED') {
+        playabilityReason = playability.reason || playabilityReason || 'Sign-in required';
+        if (/age|bot|sign in|inappropriate|verify/i.test(playabilityReason || '')) {
+          isAgeRestricted = true;
+        }
+      } else if (playability.status === 'ERROR' || playability.status === 'UNPLAYABLE') {
+        playabilityReason = playability.reason || playabilityReason || 'This video is unavailable';
+      }
+    }
+
+    const androidTracks = androidData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    const androidSegments = await extractCaptionsFromTracks(androidTracks);
+    if (androidSegments && androidSegments.length > 0) {
+      return { segments: androidSegments };
+    }
+  } catch (err) {
+    console.warn('ANDROID caption fallback error:', err);
+  }
+
+  // Tier 5: InnerTube IOS client
+  try {
+    const iosData = await retryWithBackoff(async () => {
+      const res = await resilientFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: getYouTubeHeaders({
+          'Content-Type': 'application/json',
+          'User-Agent': 'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU OS 18_1 like Mac OS X; en_US)',
+        }),
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: 'IOS',
+              clientVersion: '19.45.4',
+              hl: 'en',
+              gl: 'US',
+            },
+          },
+          videoId,
+        }),
+      });
+      if (!res.ok) throw new Error(`IOS HTTP ${res.status}`);
+      return (await res.json()) as any;
+    }, 1, 400);
+
+    const iosTracks = iosData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    const iosSegments = await extractCaptionsFromTracks(iosTracks);
+    if (iosSegments && iosSegments.length > 0) {
+      return { segments: iosSegments };
+    }
+  } catch (err) {
+    console.warn('IOS caption fallback error:', err);
+  }
+
+  // Tier 6: Web Scraping fallback for ytInitialPlayerResponse
   try {
     const pageRes = await resilientFetch(`https://www.youtube.com/watch?v=${videoId}`, {
-      headers: {
+      headers: getYouTubeHeaders({
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
-      },
+      }),
     });
 
     if (pageRes.ok) {
       const html = await pageRes.text();
 
-      // Check if web page indicates age restriction or login required
       if (/class="g-recaptcha"|sign in to confirm|confirm your age/i.test(html)) {
         isAgeRestricted = true;
       }
 
-      const match = html.match(/ytInitialPlayerResponse\s*=\s*({[\s\S]+?});(?:var\s|window\[|<)/);
+      const match =
+        html.match(/ytInitialPlayerResponse\s*=\s*({[\s\S]+?});(?:var\s|window\[|<)/) ||
+        html.match(/"captionTracks":\s*(\[[^\]]+\])/);
+
       if (match) {
-        const playerResponse = JSON.parse(match[1]);
-        const playability = playerResponse?.playabilityStatus;
-        if (playability?.status === 'LOGIN_REQUIRED' || /age|bot|sign in|inappropriate/i.test(playability?.reason || '')) {
-          isAgeRestricted = true;
-          playabilityReason = playability?.reason || playabilityReason;
-        }
-
-        const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-        if (Array.isArray(captionTracks) && captionTracks.length > 0) {
-          const sortedTracks = [...captionTracks].sort((a: any, b: any) => {
-            const aIsEn = a.languageCode === 'en' || a.languageCode?.startsWith('en');
-            const bIsEn = b.languageCode === 'en' || b.languageCode?.startsWith('en');
-            return aIsEn === bIsEn ? 0 : aIsEn ? -1 : 1;
-          });
-
-          for (const track of sortedTracks) {
-            if (!track?.baseUrl) continue;
-            try {
-              const trackRes = await resilientFetch(track.baseUrl);
-              if (trackRes.ok) {
-                const text = await trackRes.text();
-                const parsed = parseTranscriptData(text);
-                if (parsed.length > 0) {
-                  return { segments: parsed };
-                }
-              }
-            } catch {
-              // try next track
+        let captionTracks: any[] = [];
+        try {
+          if (match[0].startsWith('ytInitialPlayerResponse')) {
+            const playerResponse = JSON.parse(match[1]);
+            const playability = playerResponse?.playabilityStatus;
+            if (
+              playability?.status === 'LOGIN_REQUIRED' ||
+              /age|bot|sign in|inappropriate/i.test(playability?.reason || '')
+            ) {
+              isAgeRestricted = true;
+              playabilityReason = playability?.reason || playabilityReason;
             }
+            captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+          } else {
+            captionTracks = JSON.parse(match[1].replace(/\\u0026/g, '&'));
           }
+        } catch {}
+
+        const webSegments = await extractCaptionsFromTracks(captionTracks);
+        if (webSegments && webSegments.length > 0) {
+          return { segments: webSegments };
         }
       }
     }
@@ -477,13 +598,17 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     console.warn('Web scrape caption fallback error:', err);
   }
 
-  // Construct helpful, actionable error message conforming to requirements
-  if (isAgeRestricted || (playabilityReason && /sign in|age|bot|verify|inappropriate/i.test(playabilityReason))) {
+  // Construct helpful, clear error message conforming to requirements
+  const isActualAgeRestricted =
+    isAgeRestricted || /age|inappropriate|confirm your age|mature/i.test(playabilityReason || '');
+  const isBotBlocked = /bot|sign in|verify/i.test(playabilityReason || '');
+
+  if (isActualAgeRestricted || isBotBlocked) {
     return {
       segments: [],
       isAgeRestricted: true,
       error:
-        'This YouTube video is age-restricted (sign-in required). YouTube protects this content from automated access. Please upload the video file directly or provide its transcript to generate your AI summary.',
+        'This YouTube video cannot currently be processed. YouTube is restricting automated access (sign-in or age verification required).',
     };
   }
 
@@ -491,7 +616,7 @@ async function fetchYouTubeCaptions(videoId: string): Promise<TranscriptResult> 
     segments: [],
     noCaptions: true,
     error:
-      'No transcript or closed captions are available for this YouTube video. Please upload the video file directly or provide its transcript to generate your AI summary.',
+      'This YouTube video cannot currently be processed because captions or transcript are unavailable.',
   };
 }
 
@@ -589,7 +714,7 @@ export async function POST(request: NextRequest) {
       // Mode B: Extract transcript from YouTube URL
       if (!url || typeof url !== 'string') {
         return NextResponse.json(
-          { error: 'YouTube URL or transcript text is required.' },
+          { error: 'YouTube video URL is required.' },
           { status: 400, headers: corsHeaders() }
         );
       }
@@ -637,7 +762,7 @@ export async function POST(request: NextRequest) {
           {
             error:
               captionResult.error ||
-              'Unable to access this YouTube video. Please upload the video file directly or provide its transcript to generate your summary.',
+              'This YouTube video cannot currently be processed. Please check that the video is public and has captions available.',
             isAgeRestricted: !!captionResult.isAgeRestricted,
             noCaptions: !!captionResult.noCaptions,
             videoTitle,
