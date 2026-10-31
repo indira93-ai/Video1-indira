@@ -105,7 +105,6 @@ export default function DashboardPage() {
 
   // YouTube state
   const [youtubeUrl, setYoutubeUrl] = useState('');
-  const [youtubeTranscript, setYoutubeTranscript] = useState('');
   const [youtubeLoading, setYoutubeLoading] = useState(false);
   const [youtubeError, setYoutubeError] = useState('');
   const [youtubeStep, setYoutubeStep] = useState('');
@@ -335,10 +334,7 @@ export default function DashboardPage() {
       const res = await fetch('/api/youtube', {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          url: youtubeUrl.trim(),
-          ...(youtubeTranscript.trim() ? { transcript: youtubeTranscript.trim() } : {}),
-        }),
+        body: JSON.stringify({ url: youtubeUrl.trim() }),
       });
 
       const data = await res.json().catch(() => ({}));
@@ -738,7 +734,7 @@ export default function DashboardPage() {
                     Enter YouTube Video URL
                   </h3>
                   <p className="text-center text-surface-500 text-xs mb-5">
-                    Paste a transcript if YouTube blocks automatic access.
+                    Analyze a public YouTube video.
                   </p>
 
                   <div className="relative">
@@ -757,24 +753,6 @@ export default function DashboardPage() {
                       className="w-full pl-10 pr-4 py-3 bg-surface-800/80 border border-surface-700 rounded-xl text-surface-100 placeholder-surface-500 text-sm focus:outline-none focus:border-red-500 transition-colors"
                     />
                   </div>
-                  <label className="block mt-4">
-                    <span className="block text-xs font-medium text-surface-400 mb-2">
-                      Transcript (optional)
-                    </span>
-                    <textarea
-                      value={youtubeTranscript}
-                      onChange={(e) => {
-                        setYoutubeTranscript(e.target.value);
-                        if (youtubeError) setYoutubeError('');
-                      }}
-                      rows={5}
-                      placeholder="Paste transcript text or timestamped captions here"
-                      className="w-full px-3.5 py-3 bg-surface-800/80 border border-surface-700 rounded-xl text-surface-100 placeholder-surface-500 text-sm focus:outline-none focus:border-red-500 transition-colors resize-y"
-                    />
-                    <span className="block text-surface-600 text-xs mt-2">
-                      In YouTube, open the video description and choose “Show transcript,” then copy and paste it here.
-                    </span>
-                  </label>
                 </div>
 
                 {youtubeError && (
