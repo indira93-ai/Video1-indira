@@ -630,7 +630,7 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer | null> {
 
     const stream = await Promise.race([
       streamPromise,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('ytdl download timeout')), 10000)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('ytdl download timeout')), 25000)),
     ]);
 
     const chunks: Buffer[] = [];
@@ -729,8 +729,8 @@ export async function POST(request: NextRequest) {
       const captionResult = await fetchYouTubeCaptions(videoId);
       rawSegments = captionResult.segments;
 
-      // Optional fallback: Audio stream + Groq Whisper for non-age-restricted videos without captions
-      if ((!rawSegments || rawSegments.length === 0) && !captionResult.isAgeRestricted) {
+      // Fallback: If captions could not be extracted directly, try audio stream + Groq Whisper transcription
+      if (!rawSegments || rawSegments.length === 0) {
         const audioBuffer = await downloadYouTubeAudio(videoId);
         if (audioBuffer && audioBuffer.length > 0) {
           try {

@@ -339,7 +339,10 @@ export default function DashboardPage() {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || `Failed to analyze YouTube video (${res.status})`);
+        setYoutubeError(data.error || `Failed to analyze YouTube video (${res.status})`);
+        setYoutubeLoading(false);
+        setYoutubeStep('');
+        return;
       }
 
       setYoutubeStep('Analysis complete! Opening workspace...');
@@ -353,7 +356,6 @@ export default function DashboardPage() {
         router.push(`/video/${data.videoId}`);
       }, 700);
     } catch (err) {
-      console.error('YouTube submit error:', err);
       setYoutubeError(err instanceof Error ? err.message : 'Failed to analyze YouTube video');
       setYoutubeLoading(false);
       setYoutubeStep('');
